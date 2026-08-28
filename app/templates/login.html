@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MusicRequest - Login</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #09090b;
+            --gradient-bg: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+            --glass-bg: rgba(255, 255, 255, 0.03);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent-start: #8b5cf6;
+            --accent-end: #06b6d4;
+            --error: #ef4444;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--gradient-bg);
+            background-size: 200% 200%;
+            animation: gradientMove 15s ease infinite;
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        @keyframes gradientMove {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        .login-card {
+            background: var(--glass-bg);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid var(--glass-border);
+            border-radius: 24px;
+            padding: 3rem;
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            transition: transform 0.3s ease;
+        }
+
+        .app-title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .icon-container {
+            margin: 0 auto 2rem;
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.05);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid var(--glass-border);
+        }
+
+        .icon-container svg {
+            width: 32px;
+            height: 32px;
+            stroke: url(#accent-grad);
+        }
+
+        .input-group {
+            margin-bottom: 2rem;
+            position: relative;
+        }
+
+        .passcode-input {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+            padding: 1rem;
+            font-size: 1.5rem;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-main);
+            text-align: center;
+            letter-spacing: 0.5rem;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+
+        .passcode-input:focus {
+            border-color: var(--accent-start);
+            box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
+        }
+
+        .passcode-input::placeholder {
+            color: var(--text-muted);
+            letter-spacing: normal;
+            font-size: 1rem;
+            font-family: 'Inter', sans-serif;
+            transform: translateY(-4px);
+            display: inline-block;
+        }
+
+        .btn-submit {
+            width: 100%;
+            padding: 1rem;
+            border: none;
+            border-radius: 12px;
+            background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+            color: white;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.3s, transform 0.1s;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .btn-submit:hover {
+            opacity: 0.9;
+        }
+
+        .btn-submit:active {
+            transform: scale(0.98);
+        }
+
+        .error-message {
+            color: var(--error);
+            font-size: 0.9rem;
+            margin-top: 1rem;
+            min-height: 20px;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .shake {
+            animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+        }
+
+        @keyframes shake {
+            10%, 90% { transform: translate3d(-1px, 0, 0); }
+            20%, 80% { transform: translate3d(2px, 0, 0); }
+            30%, 50%, 70% { transform: translate3d(-4px, 0, 0); }
+            40%, 60% { transform: translate3d(4px, 0, 0); }
+        }
+    </style>
+</head>
+<body>
+
+    <svg width="0" height="0">
+        <defs>
+            <linearGradient id="accent-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#8b5cf6" />
+                <stop offset="100%" stop-color="#06b6d4" />
+            </linearGradient>
+        </defs>
+    </svg>
+
+    <div class="login-card" id="login-card">
+        <div class="icon-container">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+        </div>
+        <h1 class="app-title">MusicRequest</h1>
+        <p style="color: var(--text-muted); margin-bottom: 2rem; font-size: 0.9rem;">Authenticate to access</p>
+        
+        <form id="login-form">
+            <div class="input-group">
+                <input type="password" id="passcode-input" class="passcode-input" placeholder="Enter Passcode" autocomplete="off" autofocus>
+            </div>
+            <button type="submit" class="btn-submit">Unlock</button>
+            <div id="error-message" class="error-message">Invalid passcode</div>
+        </form>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const form = document.getElementById('login-form');
+            const input = document.getElementById('passcode-input');
+            const errorMessage = document.getElementById('error-message');
+            const card = document.getElementById('login-card');
+
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const passcode = input.value;
+                if (!passcode) return;
+
+                try {
+                    const response = await fetch('/api/auth', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ passcode })
+                    });
+
+                    if (response.ok) {
+                        window.location.reload();
+                    } else {
+                        showError();
+                    }
+                } catch (err) {
+                    showError();
+                }
+            });
+
+            function showError() {
+                errorMessage.style.opacity = '1';
+                card.classList.remove('shake');
+                void card.offsetWidth; // trigger reflow
+                card.classList.add('shake');
+                input.value = '';
+                input.focus();
+                
+                setTimeout(() => {
+                    card.classList.remove('shake');
+                }, 400);
+            }
+
+            input.addEventListener('input', () => {
+                errorMessage.style.opacity = '0';
+            });
+        });
+    </script>
+</body>
+</html>

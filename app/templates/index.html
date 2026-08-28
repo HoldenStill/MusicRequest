@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MusicRequest</title>
+    <meta name="description" content="Server-Side Music Downloader">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css?v=3">
+</head>
+<body>
+    <header class="header glass">
+        <div class="header-content">
+            <div class="brand">
+                <h1 class="gradient-text">MusicRequest</h1>
+                <span class="subtitle">Server-Side Music Downloader</span>
+            </div>
+            <div class="header-actions">
+                <button id="import-playlist-btn" class="btn-import">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    Import Playlist
+                </button>
+                <button id="settings-btn" class="btn-icon" title="Settings" aria-label="Settings">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                    </svg>
+                </button>
+                <button id="logout-btn" class="btn-logout">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                        <polyline points="16 17 21 12 16 7"></polyline>
+                        <line x1="21" y1="12" x2="9" y2="12"></line>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <div class="search-section">
+            <form id="search-form" class="search-container glass">
+                <input type="text" id="search-input" placeholder="Search music on Qobuz..." autocomplete="off">
+                <button type="submit" id="search-btn" class="btn-search">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </button>
+            </form>
+
+            <!-- Filter Pills -->
+            <div class="filter-pills">
+                <button class="filter-pill active" data-type="album">Albums</button>
+                <button class="filter-pill" data-type="track">Tracks</button>
+                <button class="filter-pill" data-type="artist">Artists</button>
+            </div>
+
+            <!-- Global Quality Selector -->
+            <div class="quality-bar">
+                <label>Quality:</label>
+                <select id="global-quality" class="quality-select">
+                    <option value="1">MP3 320</option>
+                    <option value="2">CD 16-bit</option>
+                    <option value="3" selected>Hi-Res 24-bit</option>
+                    <option value="4">Hi-Res+ 24/192</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="results-container" class="results-grid"></div>
+        <div id="no-results" class="no-results" style="display: none;"><p>No results found</p></div>
+    </main>
+
+    <!-- Queue Widget -->
+    <div id="queue-widget" class="queue-widget glass collapsed">
+        <div class="queue-header" id="queue-toggle">
+            <div class="queue-title">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="22" y1="12" x2="2" y2="12"></line>
+                    <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>
+                    <line x1="6" y1="16" x2="6.01" y2="16"></line>
+                    <line x1="10" y1="16" x2="10.01" y2="16"></line>
+                </svg>
+                Download Queue
+                <span id="queue-badge" class="badge">0</span>
+            </div>
+            <svg class="chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="18 15 12 9 6 15"></polyline>
+            </svg>
+        </div>
+        <div class="queue-body">
+            <div class="queue-section"><h4>Active</h4><div id="queue-active" class="queue-list"></div></div>
+            <div class="queue-section"><h4>Queued</h4><div id="queue-pending" class="queue-list"></div></div>
+            <div class="queue-section"><h4>Recent</h4><div id="queue-completed" class="queue-list"></div></div>
+        </div>
+    </div>
+
+    <!-- Modal Overlay (shared) -->
+    <div id="modal-overlay" class="modal-overlay">
+        <div id="modal-content" class="modal-content"></div>
+    </div>
+
+    <!-- Skeleton Template -->
+    <template id="skeleton-template">
+        <div class="album-card skeleton-card">
+            <div class="skeleton img-skeleton"></div>
+            <div class="card-body">
+                <div class="skeleton text-skeleton title-skeleton"></div>
+                <div class="skeleton text-skeleton artist-skeleton"></div>
+                <div class="skeleton btn-skeleton"></div>
+            </div>
+        </div>
+    </template>
+
+    <script>
+    (() => {
+        // ── DOM refs ────────────────────────────────────────────────────────
+        const searchForm      = document.getElementById('search-form');
+        const searchInput     = document.getElementById('search-input');
+        const resultsContainer= document.getElementById('results-container');
+        const noResults       = document.getElementById('no-results');
+        const logoutBtn       = document.getElementById('logout-btn');
+        const queueWidget     = document.getElementById('queue-widget');
+        const queueToggle     = document.getElementById('queue-toggle');
+        const queueBadge      = document.getElementById('queue-badge');
+        const modalOverlay    = document.getElementById('modal-overlay');
+        const modalContent    = document.getElementById('modal-content');
+        const globalQuality   = document.getElementById('global-quality');
+        const filterPills     = document.querySelectorAll('.filter-pill');
+
+        // ── State ───────────────────────────────────────────────────────────
+        let currentQueue    = { active: null, queued: [], completed: [] };
+        let activeFilter    = 'album';
+        let lastQuery       = '';
+
+        // ── Helpers ─────────────────────────────────────────────────────────
+        const esc = (s) => (s !== null && s !== undefined) ? String(s).replace(/</g, "&lt;").replace(/>/g, "&gt;") : '';
+        const fmtDuration = (s) => {
+            const m = Math.floor(s / 60);
+            const sec = String(s % 60).padStart(2, '0');
+            return `${m}:${sec}`;
+        };
+        const getQuality = () => parseInt(globalQuality.value, 10);
+
+        // ── Logout ──────────────────────────────────────────────────────────
+        logoutBtn.addEventListener('click', async () => {
+            try { await fetch('/api/logout', { method: 'POST' }); window.location.reload(); }
+            catch (err) { console.error('Logout failed', err); }
+        });
+
+        // ── Filter Pills ────────────────────────────────────────────────────
+        filterPills.forEach(pill => {
+            pill.addEventListener('click', () => {
+                filterPills.forEach(p => p.classList.remove('active'));
+                pill.classList.add('active');
+                activeFilter = pill.dataset.type;
+                if (lastQuery) performSearch(lastQuery);
+            });
+        });
+
+        // ── Search ──────────────────────────────────────────────────────────
+        searchForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            performSearch(searchInput.value);
+        });
+
+        const performSearch = async (query) => {
+            if (!query.trim()) return;
+            lastQuery = query;
+            showSkeletons();
+            noResults.style.display = 'none';
+
+            try {
+                const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&type=${activeFilter}`);
+                if (!res.ok) {
+                    let errMsg = 'Search failed (HTTP ' + res.status + ')';
+                    try { const d = await res.json(); if (d.detail) errMsg = d.detail; } catch(e){}
+                    throw new Error(errMsg);
+                }
+                const data = await res.json();
+                renderResults(data);
+            } catch (err) {
+                console.error(err);
+                resultsContainer.innerHTML = '';
+                noResults.innerHTML = `<p>${esc(err.message)}</p>`;
+                noResults.style.display = 'block';
+            }
+        };
+
+        function showSkeletons() {
+            resultsContainer.innerHTML = '';
+            const tpl = document.getElementById('skeleton-template');
+            for (let i = 0; i < 6; i++) resultsContainer.appendChild(tpl.content.cloneNode(true));
+        }
+
+        // ── Render Results ──────────────────────────────────────────────────
+        function renderResults(results) {
+            resultsContainer.innerHTML = '';
+            if (results.length === 0) { noResults.innerHTML = '<p>No results found</p>'; noResults.style.display = 'block'; return; }
+
+            results.forEach(item => {
+                const type = item.type || activeFilter;
+                if (type === 'track') renderTrackCard(item);
+                else if (type === 'artist') renderArtistCard(item);
+                else renderAlbumCard(item);
+            });
+        }
+
+        // ── Album Card ──────────────────────────────────────────────────────
+        function renderAlbumCard(album) {
+            const card = document.createElement('div');
+            card.className = 'album-card';
+            card.innerHTML = `
+                <div class="card-img-wrapper">
+                    <img src="${album.cover_art_url || ''}" alt="${esc(album.title)}" class="album-cover" loading="lazy" onerror="this.style.display='none'">
+                    <div class="badges">
+                        ${album.release_year ? `<span class="badge-pill">${album.release_year}</span>` : ''}
+                        ${album.tracks_count ? `<span class="badge-pill">${album.tracks_count} Tracks</span>` : ''}
+                    </div>
+                </div>
+                <div class="card-body">
+                    <h3 class="album-title" title="${esc(album.title)}">${esc(album.title)}</h3>
+                    <p class="album-artist">${esc(album.artist)}</p>
+                    <button class="btn btn-download" data-album-id="${album.album_id}">Download to Server</button>
+                </div>
+            `;
+            // Click on card image/title opens album detail modal
+            card.querySelector('.card-img-wrapper').addEventListener('click', () => openAlbumModal(album.album_id));
+            card.querySelector('.album-title').addEventListener('click', () => openAlbumModal(album.album_id));
+            // Download button
+            const btn = card.querySelector('button');
+            btn.addEventListener('click', (e) => { e.stopPropagation(); downloadAlbum(album, btn); });
+            resultsContainer.appendChild(card);
+            syncButtonState(btn, album.album_id);
+        }
+
+        // ── Track Card ──────────────────────────────────────────────────────
+        function renderTrackCard(track) {
+            const card = document.createElement('div');
+            card.className = 'track-card';
+            card.innerHTML = `
+                <img src="${track.cover_art_url || ''}" alt="" class="track-card-img" loading="lazy" onerror="this.style.display='none'">
+                <div class="track-card-info">
+                    <div class="track-card-title" title="${esc(track.title)}">${esc(track.title)}</div>
+                    <div class="track-card-meta">${esc(track.artist)} · ${esc(track.album_title)}</div>
+                </div>
+                <span class="track-card-duration">${fmtDuration(track.duration)}</span>
+                <button class="btn btn-download">↓</button>
+            `;
+            const btn = card.querySelector('button');
+            btn.addEventListener('click', () => downloadTrack(track, btn));
+            resultsContainer.appendChild(card);
+        }
+
+        // ── Artist Card ─────────────────────────────────────────────────────
+        function renderArtistCard(artist) {
+            const card = document.createElement('div');
+            card.className = 'artist-card';
+            card.innerHTML = `
+                <img src="${artist.image_url || ''}" alt="${esc(artist.name)}" class="artist-card-img" loading="lazy" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22><rect fill=%22%2321262d%22 width=%22120%22 height=%22120%22/><text x=%2260%22 y=%2268%22 font-size=%2240%22 text-anchor=%22middle%22 fill=%22%23484f58%22>♫</text></svg>'">
+                <div class="artist-card-name">${esc(artist.name)}</div>
+                <div class="artist-card-count">${artist.albums_count} album${artist.albums_count !== 1 ? 's' : ''}</div>
+            `;
+            card.addEventListener('click', () => openArtistModal(artist.artist_id));
+            resultsContainer.appendChild(card);
+        }
+
+        // ── Download Helpers ────────────────────────────────────────────────
+        async function downloadAlbum(album, btnEl) {
+            btnEl.className = 'btn btn-queued'; btnEl.textContent = 'Queuing...'; btnEl.disabled = true;
+            try {
+                const res = await fetch('/api/download', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        album_id: album.album_id, title: album.title, artist: album.artist,
+                        download_type: 'album', quality: getQuality(), cover_art_url: album.cover_art_url || ''
+                    })
+                });
+                if (!res.ok) throw new Error('Failed');
+            } catch (err) { btnEl.className = 'btn btn-failed'; btnEl.textContent = '✗ Failed - Retry'; btnEl.disabled = false; }
+        }
+
+        async function downloadTrack(track, btnEl) {
+            btnEl.className = 'btn btn-queued'; btnEl.textContent = '...'; btnEl.disabled = true;
+            try {
+                const res = await fetch('/api/download', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        album_id: track.album_id || '', title: track.title, artist: track.artist,
+                        download_type: 'track', track_id: track.track_id, quality: getQuality(),
+                        cover_art_url: track.cover_art_url || ''
+                    })
+                });
+                if (!res.ok) throw new Error('Failed');
+                btnEl.className = 'btn btn-completed'; btnEl.textContent = '✓';
+            } catch (err) { btnEl.className = 'btn btn-failed'; btnEl.textContent = '✗'; btnEl.disabled = false; }
+        }
+
+        function syncButtonState(btn, albumId) {
+            if (currentQueue.active && currentQueue.active.album_id === albumId) {
+                btn.className = 'btn btn-downloading'; btn.textContent = 'Downloading...'; btn.disabled = true;
+            } else if (currentQueue.queued.find(q => q.album_id === albumId)) {
+                btn.className = 'btn btn-queued'; btn.textContent = 'Queued'; btn.disabled = true;
+            } else {
+                const completed = currentQueue.completed.find(c => c.album_id === albumId);
+                if (completed) {
+                    if (completed.status === 'completed') { btn.className = 'btn btn-completed'; btn.textContent = '✓ Complete'; btn.disabled = true; }
+                    else { btn.className = 'btn btn-failed'; btn.textContent = '✗ Failed - Retry'; btn.disabled = false; }
+                }
+            }
+        }
+
+        // ── Album Detail Modal ──────────────────────────────────────────────
+        async function openAlbumModal(albumId) {
+            modalContent.innerHTML = '<div class="modal-loading"><div class="spinner"></div></div>';
+            modalOverlay.classList.add('active');
+
+            try {
+                const res = await fetch(`/api/album/${albumId}/tracks`);
+                if (!res.ok) throw new Error('Failed to load album');
+                const album = await res.json();
+                renderAlbumModal(album);
+            } catch (err) {
+                modalContent.innerHTML = `<div style="padding:2rem;text-align:center;color:var(--text-muted)">${esc(err.message)}</div>`;
+            }
+        }
+
+        function renderAlbumModal(album) {
+            // Build a quality badge string for a track (e.g. "24/96" or "16/44")
+            function qualityBadge(t) {
+                if (!t.bit_depth || !t.sample_rate) return '';
+                const sr = t.sample_rate >= 1000 ? (t.sample_rate / 1000).toFixed(t.sample_rate % 1000 === 0 ? 0 : 1) + 'k' : t.sample_rate;
+                return `<span class="track-quality">${t.bit_depth}/${sr}</span>`;
+            }
+            const tracksHtml = album.tracks.map(t => `
+                <div class="track-row" data-track-id="${t.track_id}">
+                    <input type="checkbox" class="track-check" value="${t.track_id}">
+                    <div class="track-num-col">
+                        <span class="track-num">${t.track_number}</span>
+                        ${qualityBadge(t)}
+                    </div>
+                    <div class="track-info">
+                        <div class="track-name">${esc(t.title)}</div>
+                        <div class="track-artist">${esc(t.artist)}</div>
+                    </div>
+                    <span class="track-duration">${fmtDuration(t.duration)}</span>
+                    <button class="track-dl-btn" title="Download this track">↓</button>
+                </div>
+            `).join('');
+
+            // Format release date: prefer full date, fall back to year
+            const releaseMeta = album.release_date
+                ? new Date(album.release_date).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+                : (album.release_year || '');
+
+            modalContent.innerHTML = `
+                <div class="album-detail-header">
+                    <button class="modal-close" id="modal-close-btn">✕</button>
+                    <img src="${album.cover_art_url || ''}" alt="" class="album-detail-cover" onerror="this.style.display='none'">
+                    <div class="album-detail-info">
+                        <h2>${esc(album.title)}</h2>
+                        <div class="artist-name">${esc(album.artist)}</div>
+                        <div class="meta-line">${releaseMeta}${releaseMeta ? ' · ' : ''}${album.tracks_count} tracks</div>
+                    </div>
+                </div>
+                <div class="album-detail-actions">
+                    <button class="btn btn-download" id="dl-full-album">Download Full Album</button>
+                    <button class="btn btn-secondary" id="dl-selected" disabled>Download Selected (0)</button>
+                    <label style="display:flex;align-items:center;gap:6px;margin-left:auto">
+                        <input type="checkbox" id="select-all-tracks" style="width:16px;height:16px;cursor:pointer"> All
+                    </label>
+                </div>
+                <div class="tracklist">${tracksHtml}</div>
+            `;
+
+            // Close button
+            document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+
+            // Full album download
+            document.getElementById('dl-full-album').addEventListener('click', function() {
+                downloadAlbum({ album_id: album.album_id, title: album.title, artist: album.artist, cover_art_url: album.cover_art_url }, this);
+            });
+
+            // Individual track download buttons
+            modalContent.querySelectorAll('.track-dl-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const row = btn.closest('.track-row');
+                    const trackId = row.dataset.trackId;
+                    const track = album.tracks.find(t => t.track_id === trackId);
+                    if (track) {
+                        downloadTrack({
+                            track_id: track.track_id, title: track.title, artist: track.artist,
+                            album_id: album.album_id, cover_art_url: album.cover_art_url
+                        }, btn);
+                    }
+                });
+            });
+
+            // Checkboxes + select all
+            const checkboxes = modalContent.querySelectorAll('.track-check');
+            const selectAll = document.getElementById('select-all-tracks');
+            const dlSelected = document.getElementById('dl-selected');
+
+            const updateSelectedCount = () => {
+                const checked = modalContent.querySelectorAll('.track-check:checked');
+                dlSelected.disabled = checked.length === 0;
+                dlSelected.textContent = `Download Selected (${checked.length})`;
+            };
+
+            checkboxes.forEach(cb => cb.addEventListener('change', updateSelectedCount));
+            selectAll.addEventListener('change', (e) => {
+                checkboxes.forEach(cb => { cb.checked = e.target.checked; });
+                updateSelectedCount();
+            });
+
+            // Click track row to toggle checkbox
+            modalContent.querySelectorAll('.track-row').forEach(row => {
+                row.addEventListener('click', (e) => {
+                    if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+                    const cb = row.querySelector('.track-check');
+                    cb.checked = !cb.checked;
+                    updateSelectedCount();
+                });
+            });
+
+            // Download selected tracks
+            dlSelected.addEventListener('click', () => {
+                const checked = modalContent.querySelectorAll('.track-check:checked');
+                checked.forEach(cb => {
+                    const trackId = cb.value;
+                    const track = album.tracks.find(t => t.track_id === trackId);
+                    if (track) {
+                        downloadTrack({
+                            track_id: track.track_id, title: track.title, artist: track.artist,
+                            album_id: album.album_id, cover_art_url: album.cover_art_url
+                        }, cb.closest('.track-row').querySelector('.track-dl-btn'));
+                    }
+                });
+                dlSelected.textContent = 'Queued!';
+                dlSelected.disabled = true;
+            });
+        }
+
+        // ── Artist Detail Modal ─────────────────────────────────────────────
+        async function openArtistModal(artistId) {
+            modalContent.innerHTML = '<div class="modal-loading"><div class="spinner"></div></div>';
+            modalOverlay.classList.add('active');
+
+            try {
+                const res = await fetch(`/api/artist/${artistId}`);
+                if (!res.ok) throw new Error('Failed to load artist');
+                const artist = await res.json();
+                renderArtistModal(artist);
+            } catch (err) {
+                modalContent.innerHTML = `<div style="padding:2rem;text-align:center;color:var(--text-muted)">${esc(err.message)}</div>`;
+            }
+        }
+
+        function renderArtistModal(artist) {
+            const topTracks = Array.isArray(artist.top_tracks) ? artist.top_tracks : [];
+            const albums = Array.isArray(artist.albums) ? artist.albums : [];
+            const albumsCount = typeof artist.albums_count === 'number' ? artist.albums_count : albums.length;
+
+            const topTracksHtml = topTracks.length > 0 ? `
+                <div class="artist-section">
+                    <h3>Popular Tracks</h3>
+                    <div class="artist-top-tracks">
+                        ${topTracks.map((t, i) => `
+                            <div class="top-track-row">
+                                <span class="top-track-num">${i + 1}</span>
+                                <div class="top-track-info">
+                                    <div class="top-track-title">${esc(t.title)}</div>
+                                    <div class="top-track-album">${esc(t.album_title)}</div>
+                                </div>
+                                <span class="track-duration">${fmtDuration(t.duration || 0)}</span>
+                                <button class="track-dl-btn" data-track-id="${t.track_id}" data-album-id="${t.album_id}" data-title="${esc(t.title)}" data-artist="${esc(artist.name || 'Unknown Artist')}" data-cover="${t.cover_art_url || ''}">↓</button>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : '';
+
+            const albumsHtml = albums.length > 0 ? `
+                <div class="artist-section">
+                    <h3>Discography (${albums.length})</h3>
+                    <div class="artist-albums-grid">
+                        ${albums.map(a => `
+                            <div class="artist-album-card" data-album-id="${a.album_id}">
+                                <img src="${a.cover_art_url || ''}" alt="" class="artist-album-cover" loading="lazy" onerror="this.style.display='none'">
+                                <div class="artist-album-info">
+                                    <div class="artist-album-title" title="${esc(a.title)}">${esc(a.title)}</div>
+                                    <div class="artist-album-year">${a.release_year || ''} · ${a.tracks_count || 0} tracks</div>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : '';
+
+            const fallbackImg = `data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22140%22 height=%22140%22><rect fill=%22%2321262d%22 width=%22140%22 height=%22140%22 rx=%2270%22/><text x=%2270%22 y=%2278%22 font-size=%2250%22 text-anchor=%22middle%22 fill=%22%23484f58%22>♫</text></svg>`;
+
+            modalContent.innerHTML = `
+                <div class="artist-detail-header">
+                    <button class="modal-close" id="modal-close-btn">✕</button>
+                    <img src="${artist.image_url || fallbackImg}" alt="" class="artist-detail-img" onerror="this.src='${fallbackImg}'">
+                    <h2>${esc(artist.name || 'Unknown Artist')}</h2>
+                    <div class="meta-line">${albumsCount} album${albumsCount !== 1 ? 's' : ''}</div>
+                    ${(typeof artist.biography === 'string' && artist.biography.trim()) ? `<div class="artist-bio">${artist.biography}</div>` : ''}
+                </div>
+                ${topTracksHtml}
+                ${albumsHtml}
+            `;
+
+            // Close button
+            document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+
+            // Click album cards to open album detail
+            modalContent.querySelectorAll('.artist-album-card').forEach(card => {
+                card.addEventListener('click', () => openAlbumModal(card.dataset.albumId));
+            });
+
+            // Download top track buttons
+            modalContent.querySelectorAll('.top-track-row .track-dl-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    downloadTrack({
+                        track_id: btn.dataset.trackId, title: btn.dataset.title,
+                        artist: btn.dataset.artist, album_id: btn.dataset.albumId,
+                        cover_art_url: btn.dataset.cover
+                    }, btn);
+                });
+            });
+        }
+
+        // ── Modal Controls ──────────────────────────────────────────────────
+        function closeModal() { modalOverlay.classList.remove('active'); }
+        modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+        // ── Queue Widget ────────────────────────────────────────────────────
+        queueToggle.addEventListener('click', () => queueWidget.classList.toggle('collapsed'));
+
+        function updateQueueWidget() {
+            const activeCount = currentQueue.active ? 1 : 0;
+            const queuedCount = currentQueue.queued.length;
+            const total = activeCount + queuedCount;
+            queueBadge.textContent = total;
+            queueBadge.style.display = total > 0 ? 'inline-flex' : 'none';
+
+            const activeC = document.getElementById('queue-active');
+            const pendingC = document.getElementById('queue-pending');
+            const completedC = document.getElementById('queue-completed');
+
+            activeC.innerHTML = currentQueue.active ?
+                `<div class="queue-item active"><div class="pulse-dot"></div><div><span class="queue-item-type">${currentQueue.active.download_type || 'album'}</span><div class="queue-title">${esc(currentQueue.active.title)}</div><div class="queue-sub">${esc(currentQueue.active.artist)}</div></div></div>` :
+                '<div class="queue-empty">No active downloads</div>';
+
+            pendingC.innerHTML = currentQueue.queued.length ?
+                currentQueue.queued.map(q => `<div class="queue-item"><div><span class="queue-item-type">${q.download_type || 'album'}</span><div class="queue-title">${esc(q.title)}</div><div class="queue-sub">${esc(q.artist)}</div></div></div>`).join('') :
+                '<div class="queue-empty">Queue is empty</div>';
+
+            completedC.innerHTML = currentQueue.completed.slice(0, 5).map(c =>
+                `<div class="queue-item ${c.status}"><div class="status-icon">${c.status === 'completed' ? '✓' : '✗'}</div><div><span class="queue-item-type">${c.download_type || 'album'}</span><div class="queue-title">${esc(c.title)}</div><div class="queue-sub">${esc(c.artist)}</div></div></div>`
+            ).join('') || '<div class="queue-empty">No recent history</div>';
+
+            updateGridButtons();
+        }
+
+        function updateGridButtons() {
+            document.querySelectorAll('.results-grid .btn[data-album-id]').forEach(btn => {
+                syncButtonState(btn, btn.getAttribute('data-album-id'));
+            });
+        }
+
+        // ── SSE ─────────────────────────────────────────────────────────────
+        function connectSSE() {
+            const evtSource = new EventSource('/api/queue');
+            evtSource.onmessage = (event) => {
+                try { currentQueue = JSON.parse(event.data); updateQueueWidget(); }
+                catch (e) { console.error("Error parsing SSE", e); }
+            };
+            evtSource.onerror = () => console.error("SSE connection error, reconnecting...");
+        }
+
+        async function init() {
+            try {
+                const res = await fetch('/api/queue/status');
+                if (res.ok) { currentQueue = await res.json(); updateQueueWidget(); }
+            } catch (e) { console.error("Failed to fetch initial queue status", e); }
+            connectSSE();
+        }
+
+        document.addEventListener('DOMContentLoaded', init);
+
+        // ── Playlist Import ─────────────────────────────────────────────────
+        const importBtn = document.getElementById('import-playlist-btn');
+        let playlistAnalysisCache = null;
+        let playlistUrlCache = '';
+        let playlistQualityCache = 3;
+
+        importBtn.addEventListener('click', () => openPlaylistInputModal());
+
+        function openPlaylistInputModal() {
+            modalContent.innerHTML = `
+                <div class="playlist-input-section">
+                    <button class="modal-close" id="modal-close-btn">✕</button>
+                    <h2 class="gradient-text">Import Playlist</h2>
+                    <p>Paste a public Spotify or Qobuz playlist URL below to analyze and import tracks.</p>
+                    <input type="text" class="playlist-url-input" id="playlist-url-input"
+                           placeholder="https://open.spotify.com/playlist/..." autocomplete="off">
+                    <div class="quality-bar" style="justify-content:flex-start">
+                        <label>Quality:</label>
+                        <select id="import-quality" class="quality-select">
+                            <option value="1">MP3 320</option>
+                            <option value="2">CD 16-bit</option>
+                            <option value="3" selected>Hi-Res 24-bit</option>
+                            <option value="4">Hi-Res+ 24/192</option>
+                        </select>
+                    </div>
+                    <button class="btn-analyze" id="btn-analyze-playlist">Analyze Playlist</button>
+                </div>
+            `;
+            modalOverlay.classList.add('active');
+            document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+
+            const urlInput = document.getElementById('playlist-url-input');
+            const analyzeBtn = document.getElementById('btn-analyze-playlist');
+
+            const captureQuality = () => {
+                const qualityEl = document.getElementById('import-quality');
+                if (qualityEl) {
+                    playlistQualityCache = parseInt(qualityEl.value, 10);
+                }
+            };
+
+            analyzeBtn.addEventListener('click', () => {
+                const url = urlInput.value.trim();
+                if (!url) return;
+                captureQuality();
+                analyzePlaylist(url);
+            });
+
+            urlInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const url = urlInput.value.trim();
+                    captureQuality();
+                    if (url) analyzePlaylist(url);
+                }
+            });
+        }
+
+        async function analyzePlaylist(url) {
+            playlistUrlCache = url;
+            modalContent.innerHTML = `
+                <div class="analysis-loading">
+                    <button class="modal-close" id="modal-close-btn">✕</button>
+                    <div class="spinner"></div>
+                    <p>Analyzing playlist...</p>
+                    <p style="font-size:0.75rem;color:var(--text-muted)">Scraping tracks, scanning library, matching on Qobuz...</p>
+                </div>
+            `;
+            document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+
+            try {
+                const res = await fetch('/api/playlist/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url }),
+                });
+                if (!res.ok) {
+                    let errMsg = 'Analysis failed';
+                    try { const d = await res.json(); if (d.detail) errMsg = d.detail; } catch(e) {}
+                    throw new Error(errMsg);
+                }
+                const data = await res.json();
+                playlistAnalysisCache = data;
+                renderPlaylistPreview(data);
+            } catch (err) {
+                modalContent.innerHTML = `
+                    <div class="playlist-input-section">
+                        <button class="modal-close" id="modal-close-btn">✕</button>
+                        <h2 style="color:var(--error)">Analysis Failed</h2>
+                        <p>${esc(err.message)}</p>
+                        <button class="btn-analyze" id="btn-retry">Try Again</button>
+                    </div>
+                `;
+                document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+                document.getElementById('btn-retry').addEventListener('click', () => openPlaylistInputModal());
+            }
+        }
+
+        function renderPlaylistPreview(data) {
+            const fmtDur = (ms) => {
+                const m = Math.floor(ms / 60000);
+                const s = String(Math.floor((ms % 60000) / 1000)).padStart(2, '0');
+                return `${m}:${s}`;
+            };
+
+            const tracksHtml = data.tracks.map((t, i) => {
+                const isLocal = t.is_local;
+                const hasMatch = !!t.qobuz_track_id;
+                const rowClass = isLocal ? 'is-local' : 'is-missing';
+                const statusText = isLocal ? '✓ Local' : (hasMatch ? 'Matched' : 'No match');
+                const confidenceText = !isLocal && hasMatch ? `${Math.round(t.match_confidence * 100)}%` : '';
+
+                return `
+                    <div class="pl-track-row ${rowClass}" data-index="${i}">
+                        <input type="checkbox" class="pl-track-check"
+                               ${!isLocal && hasMatch ? 'checked' : ''}
+                               ${isLocal || !hasMatch ? 'disabled' : ''}
+                               value="${i}">
+                        <span class="pl-track-num">${i + 1}</span>
+                        <div class="pl-track-info">
+                            <div class="pl-track-title">${esc(t.title)}</div>
+                            <div class="pl-track-artist">${esc(t.artist)}</div>
+                        </div>
+                        <span class="pl-track-confidence">${confidenceText}</span>
+                        <span class="pl-track-status">${statusText}</span>
+                    </div>
+                `;
+            }).join('');
+
+            const matchedCount = data.tracks.filter(t => !t.is_local && t.qobuz_track_id).length;
+            const unmatchedCount = data.missing_tracks - matchedCount;
+
+            modalContent.innerHTML = `
+                <div class="playlist-header">
+                    <button class="modal-close" id="modal-close-btn">✕</button>
+                    <img src="${data.cover_art_url || ''}" alt="" class="playlist-cover"
+                         onerror="this.style.display='none'">
+                    <div class="playlist-meta">
+                        <h2>${esc(data.name)}</h2>
+                        <div class="playlist-owner">${esc(data.owner || data.source)}</div>
+                        <div class="playlist-stats">
+                            <span class="stat-item"><strong>${data.total_tracks}</strong> total</span>
+                            <span class="stat-item local"><strong>${data.local_tracks}</strong> local</span>
+                            <span class="stat-item missing"><strong>${matchedCount}</strong> matched</span>
+                            ${unmatchedCount > 0 ? `<span class="stat-item" style="color:var(--warning)"><strong>${unmatchedCount}</strong> no match</span>` : ''}
+                        </div>
+                    </div>
+                </div>
+                <div class="playlist-actions">
+                    <button class="btn btn-download" id="pl-dl-all-missing">
+                        Download All Missing (${matchedCount})
+                    </button>
+                    <button class="btn btn-secondary" id="pl-dl-selected" disabled>
+                        Download Selected (0)
+                    </button>
+                    <label style="display:flex;align-items:center;gap:6px;margin-left:auto">
+                        <input type="checkbox" id="pl-select-all" checked
+                               style="width:16px;height:16px;cursor:pointer"> All matched
+                    </label>
+                </div>
+                <div class="playlist-tracklist">${tracksHtml}</div>
+            `;
+
+            document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+
+            // Checkbox logic
+            const checkboxes = modalContent.querySelectorAll('.pl-track-check:not(:disabled)');
+            const selectAll = document.getElementById('pl-select-all');
+            const dlSelected = document.getElementById('pl-dl-selected');
+            const dlAllMissing = document.getElementById('pl-dl-all-missing');
+
+            const updateCount = () => {
+                const checked = modalContent.querySelectorAll('.pl-track-check:checked');
+                dlSelected.disabled = checked.length === 0;
+                dlSelected.textContent = `Download Selected (${checked.length})`;
+            };
+
+            checkboxes.forEach(cb => cb.addEventListener('change', updateCount));
+            selectAll.addEventListener('change', (e) => {
+                checkboxes.forEach(cb => { cb.checked = e.target.checked; });
+                updateCount();
+            });
+
+            // Click row to toggle
+            modalContent.querySelectorAll('.pl-track-row.is-missing').forEach(row => {
+                row.addEventListener('click', (e) => {
+                    if (e.target.tagName === 'INPUT') return;
+                    const cb = row.querySelector('.pl-track-check');
+                    if (cb && !cb.disabled) {
+                        cb.checked = !cb.checked;
+                        updateCount();
+                    }
+                });
+            });
+
+            // Download All Missing
+            dlAllMissing.addEventListener('click', () => {
+                const allIndices = data.tracks
+                    .map((t, i) => (!t.is_local && t.qobuz_track_id) ? i : -1)
+                    .filter(i => i >= 0);
+                startPlaylistImport(allIndices);
+            });
+
+            // Download Selected
+            dlSelected.addEventListener('click', () => {
+                const checked = modalContent.querySelectorAll('.pl-track-check:checked');
+                const indices = Array.from(checked).map(cb => parseInt(cb.value, 10));
+                startPlaylistImport(indices);
+            });
+
+            updateCount();
+        }
+
+        async function startPlaylistImport(selectedIndices) {
+            const qualityEl = document.getElementById('import-quality');
+            const quality = qualityEl ? parseInt(qualityEl.value, 10) : playlistQualityCache;
+
+            modalContent.innerHTML = `
+                <div class="import-progress">
+                    <button class="modal-close" id="modal-close-btn">✕</button>
+                    <div class="spinner"></div>
+                    <h3>Starting Import...</h3>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill" id="import-progress-bar"></div>
+                    </div>
+                    <div class="import-step" id="import-step">Queuing tracks...</div>
+                    <div class="import-counter" id="import-counter"></div>
+                </div>
+            `;
+            document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+
+            try {
+                const res = await fetch('/api/playlist/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        url: playlistUrlCache,
+                        selected_indices: selectedIndices,
+                        quality: quality,
+                    }),
+                });
+                if (!res.ok) throw new Error('Import request failed');
+                const job = await res.json();
+                monitorImportProgress(job.import_id, job.total_tracks);
+            } catch (err) {
+                document.getElementById('import-step').textContent = `Error: ${err.message}`;
+            }
+        }
+
+        function monitorImportProgress(importId, totalTracks) {
+            const evtSource = new EventSource(`/api/playlist/import/${importId}/status`);
+            const progressBar = document.getElementById('import-progress-bar');
+            const stepEl = document.getElementById('import-step');
+            const counterEl = document.getElementById('import-counter');
+
+            evtSource.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    const done = data.completed_tracks + data.failed_tracks;
+                    const pct = totalTracks > 0 ? Math.round((done / totalTracks) * 100) : 0;
+
+                    if (progressBar) progressBar.style.width = pct + '%';
+                    if (stepEl) stepEl.textContent = data.current_step || '';
+                    if (counterEl) counterEl.textContent = `${done} / ${totalTracks} tracks`;
+
+                    if (data.status === 'complete') {
+                        evtSource.close();
+                        if (progressBar) progressBar.style.width = '100%';
+                        if (stepEl) stepEl.innerHTML = '<span style="color:var(--success)">✓ Import complete! Playlist file generated.</span>';
+                    } else if (data.status === 'failed') {
+                        evtSource.close();
+                        if (stepEl) stepEl.innerHTML = `<span style="color:var(--error)">✗ ${esc(data.error || 'Import failed')}</span>`;
+                    }
+                } catch (e) {
+                    console.error('Error parsing import SSE', e);
+                }
+            };
+            evtSource.onerror = () => {
+                console.error('Import SSE error');
+                evtSource.close();
+            };
+        }
+    })();
+    </script>
+
+    <!-- Settings Modal -->
+    <div id="settings-overlay" class="modal-overlay">
+        <div class="modal-content" style="max-width:480px;padding:0">
+            <div style="padding:1.5rem 1.5rem 0">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem">
+                    <h2 style="margin:0;font-size:1.1rem;font-weight:600">Settings</h2>
+                    <button id="settings-close-btn" class="modal-close" style="position:static;transform:none">✕</button>
+                </div>
+                <div style="margin-bottom:1rem">
+                    <p style="font-size:0.78rem;color:var(--text-muted);margin:0 0 1rem">
+                        Configure Jellyfin integration to auto-scan your library and upload playlist artwork after imports.
+                    </p>
+                    <label style="display:block;font-size:0.8rem;font-weight:500;margin-bottom:0.4rem">Jellyfin Server URL</label>
+                    <input id="settings-jf-url" type="url" placeholder="http://192.168.1.x:8096"
+                        style="width:100%;box-sizing:border-box;background:var(--surface-2,#1a1a2e);border:1px solid var(--border,rgba(255,255,255,0.1));border-radius:8px;padding:0.6rem 0.75rem;color:var(--text-primary,#fff);font-size:0.875rem;outline:none">
+                    <label style="display:block;font-size:0.8rem;font-weight:500;margin:0.85rem 0 0.4rem">Jellyfin API Key</label>
+                    <input id="settings-jf-key" type="password" placeholder="Paste your API key"
+                        style="width:100%;box-sizing:border-box;background:var(--surface-2,#1a1a2e);border:1px solid var(--border,rgba(255,255,255,0.1));border-radius:8px;padding:0.6rem 0.75rem;color:var(--text-primary,#fff);font-size:0.875rem;outline:none">
+                    <p id="settings-jf-status" style="font-size:0.75rem;margin:0.6rem 0 0;min-height:1.2em"></p>
+                </div>
+            </div>
+            <div style="padding:1rem 1.5rem;border-top:1px solid var(--border,rgba(255,255,255,0.08));display:flex;gap:0.75rem;justify-content:flex-end">
+                <button id="settings-save-btn" class="btn btn-download" style="min-width:100px">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    // Settings modal logic
+    (function() {
+        const overlay = document.getElementById('settings-overlay');
+        const closeBtn = document.getElementById('settings-close-btn');
+        const saveBtn  = document.getElementById('settings-save-btn');
+        const urlInput = document.getElementById('settings-jf-url');
+        const keyInput = document.getElementById('settings-jf-key');
+        const status   = document.getElementById('settings-jf-status');
+
+        document.getElementById('settings-btn').addEventListener('click', async () => {
+            overlay.classList.add('active');
+            status.textContent = '';
+            try {
+                const res = await fetch('/api/settings');
+                if (res.ok) {
+                    const s = await res.json();
+                    urlInput.value = s.jellyfin_url || '';
+                    keyInput.placeholder = s.jellyfin_configured
+                        ? (s.jellyfin_api_key_masked || 'API key saved')
+                        : 'Paste your API key';
+                }
+            } catch {}
+        });
+
+        closeBtn.addEventListener('click', () => { overlay.classList.remove('active'); });
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.classList.remove('active'); });
+
+        saveBtn.addEventListener('click', async () => {
+            const url = urlInput.value.trim();
+            const key = keyInput.value.trim();
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving…';
+            status.style.color = 'var(--text-muted)';
+            status.textContent = '';
+            try {
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ jellyfin_url: url, jellyfin_api_key: key }),
+                });
+                if (res.ok) {
+                    status.style.color = 'var(--success, #4ade80)';
+                    status.textContent = '✓ Settings saved';
+                    if (!key) keyInput.placeholder = 'Paste your API key';
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    status.style.color = 'var(--error, #f87171)';
+                    status.textContent = '✗ ' + (err.detail || 'Save failed');
+                }
+            } catch (e) {
+                status.style.color = 'var(--error, #f87171)';
+                status.textContent = '✗ Network error';
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Save';
+            }
+        });
+    })();
+    </script>
+</body>
+</html>

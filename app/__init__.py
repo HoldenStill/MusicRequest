@@ -1,0 +1,1 @@
+"""MusicRequest backend initialization."""
