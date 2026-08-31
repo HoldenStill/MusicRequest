@@ -226,6 +226,7 @@
                 <div class="card-body">
                     <h3 class="album-title" title="${esc(album.title)}">${esc(album.title)}</h3>
                     <p class="album-artist">${esc(album.artist)}</p>
+                    <p class="album-size">${album.estimated_size_readable || 'Unknown size'}</p>
                     <button class="btn btn-download" data-album-id="${album.album_id}">Download to Server</button>
                 </div>
             `;
@@ -271,28 +272,28 @@
         }
 
         // ── Download Helpers ────────────────────────────────────────────────
-        async function downloadAlbum(album, btnEl) {
+        async function downloadAlbum(album, btnEl, quality = null) {
             btnEl.className = 'btn btn-queued'; btnEl.textContent = 'Queuing...'; btnEl.disabled = true;
             try {
                 const res = await fetch('/api/download', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         album_id: album.album_id, title: album.title, artist: album.artist,
-                        download_type: 'album', quality: getQuality(), cover_art_url: album.cover_art_url || ''
+                        download_type: 'album', quality: quality || getQuality(), cover_art_url: album.cover_art_url || ''
                     })
                 });
                 if (!res.ok) throw new Error('Failed');
             } catch (err) { btnEl.className = 'btn btn-failed'; btnEl.textContent = '✗ Failed - Retry'; btnEl.disabled = false; }
         }
 
-        async function downloadTrack(track, btnEl) {
+        async function downloadTrack(track, btnEl, quality = null) {
             btnEl.className = 'btn btn-queued'; btnEl.textContent = '...'; btnEl.disabled = true;
             try {
                 const res = await fetch('/api/download', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         album_id: track.album_id || '', title: track.title, artist: track.artist,
-                        download_type: 'track', track_id: track.track_id, quality: getQuality(),
+                        download_type: 'track', track_id: track.track_id, quality: quality || getQuality(),
                         cover_art_url: track.cover_art_url || ''
                     })
                 });
@@ -365,30 +366,46 @@
                     <div class="album-detail-info">
                         <h2>${esc(album.title)}</h2>
                         <div class="artist-name">${esc(album.artist)}</div>
-                        <div class="meta-line">${releaseMeta}${releaseMeta ? ' · ' : ''}${album.tracks_count} tracks</div>
+                        <div class="meta-line">${releaseMeta}${releaseMeta ? ' · ' : ''}${album.tracks_count} tracks · <span id="file-size-display">${album.estimated_size_readable || 'Unknown size'}</span></div>
                     </div>
                 </div>
                 <div class="album-detail-actions">
                     <button class="btn btn-download" id="dl-full-album">Download Full Album</button>
                     <button class="btn btn-secondary" id="dl-selected" disabled>Download Selected (0)</button>
                     <label style="display:flex;align-items:center;gap:6px;margin-left:auto">
-                        <input type="checkbox" id="select-all-tracks" style="width:16px;height:16px;cursor:pointer"> All
+                        <select id="modal-quality-select" class="quality-select">
+                            <option value="1">MP3 320</option>
+                            <option value="2">CD 16-bit</option>
+                            <option value="3" selected>Hi-Res 24-bit</option>
+                            <option value="4">Hi-Res+ 24/192</option>
+                        </select>
                     </label>
                 </div>
                 <div class="tracklist">${tracksHtml}</div>
             `;
 
-            // Close button
-            document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+            // Handle close button - must be after innerHTML
+            const closeBtn = modalContent.querySelector('#modal-close-btn');
+            if (closeBtn) {
+                closeBtn.addEventListener('click', closeModal);
+            }
 
-            // Full album download
-            document.getElementById('dl-full-album').addEventListener('click', function() {
-                downloadAlbum({ album_id: album.album_id, title: album.title, artist: album.artist, cover_art_url: album.cover_art_url }, this);
-            });
+            // Handle full album download - must be after innerHTML
+            const fullAlbumBtn = modalContent.querySelector('#dl-full-album');
+            if (fullAlbumBtn) {
+                fullAlbumBtn.addEventListener('click', function() {
+                    const qualitySelect = document.getElementById('modal-quality-select');
+                    const quality = qualitySelect ? parseInt(qualitySelect.value) : getQuality();
+                    downloadAlbum({ album_id: album.album_id, title: album.title, artist: album.artist, cover_art_url: album.cover_art_url }, this, quality);
+                });
+            }
 
-            // Individual track download buttons
-            modalContent.querySelectorAll('.track-dl-btn').forEach(btn => {
+            // Handle track downloads - must be after innerHTML
+            const trackDlBtns = modalContent.querySelectorAll('.track-dl-btn');
+            trackDlBtns.forEach(btn => {
                 btn.addEventListener('click', () => {
+                    const qualitySelect = document.getElementById('modal-quality-select');
+                    const quality = qualitySelect ? parseInt(qualitySelect.value) : getQuality();
                     const row = btn.closest('.track-row');
                     const trackId = row.dataset.trackId;
                     const track = album.tracks.find(t => t.track_id === trackId);
@@ -396,54 +413,61 @@
                         downloadTrack({
                             track_id: track.track_id, title: track.title, artist: track.artist,
                             album_id: album.album_id, cover_art_url: album.cover_art_url
-                        }, btn);
+                        }, btn, quality);
                     }
                 });
             });
 
-            // Checkboxes + select all
+            // Handle checkboxes and selection - must be after innerHTML
             const checkboxes = modalContent.querySelectorAll('.track-check');
-            const selectAll = document.getElementById('select-all-tracks');
-            const dlSelected = document.getElementById('dl-selected');
+            const selectAll = modalContent.querySelector('#select-all-tracks'); 
+            const dlSelected = modalContent.querySelector('#dl-selected');
 
-            const updateSelectedCount = () => {
-                const checked = modalContent.querySelectorAll('.track-check:checked');
-                dlSelected.disabled = checked.length === 0;
-                dlSelected.textContent = `Download Selected (${checked.length})`;
-            };
+            if (checkboxes && dlSelected) {
+                const updateSelectedCount = () => {
+                    const checked = modalContent.querySelectorAll('.track-check:checked');
+                    dlSelected.disabled = checked.length === 0;
+                    dlSelected.textContent = `Download Selected (${checked.length})`;
+                };
 
-            checkboxes.forEach(cb => cb.addEventListener('change', updateSelectedCount));
-            selectAll.addEventListener('change', (e) => {
-                checkboxes.forEach(cb => { cb.checked = e.target.checked; });
-                updateSelectedCount();
-            });
+                checkboxes.forEach(cb => cb.addEventListener('change', updateSelectedCount));
+                
+                if (selectAll) {
+                    selectAll.addEventListener('change', (e) => {
+                        checkboxes.forEach(cb => { cb.checked = e.target.checked; });
+                        updateSelectedCount();
+                    });
+                }
 
-            // Click track row to toggle checkbox
-            modalContent.querySelectorAll('.track-row').forEach(row => {
-                row.addEventListener('click', (e) => {
-                    if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
-                    const cb = row.querySelector('.track-check');
-                    cb.checked = !cb.checked;
-                    updateSelectedCount();
+                // Click track row to toggle checkbox
+                modalContent.querySelectorAll('.track-row').forEach(row => {
+                    row.addEventListener('click', (e) => {
+                        if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+                        const cb = row.querySelector('.track-check');
+                        if (cb) cb.checked = !cb.checked;
+                        updateSelectedCount();
+                    });
                 });
-            });
 
-            // Download selected tracks
-            dlSelected.addEventListener('click', () => {
-                const checked = modalContent.querySelectorAll('.track-check:checked');
-                checked.forEach(cb => {
-                    const trackId = cb.value;
-                    const track = album.tracks.find(t => t.track_id === trackId);
-                    if (track) {
-                        downloadTrack({
-                            track_id: track.track_id, title: track.title, artist: track.artist,
-                            album_id: album.album_id, cover_art_url: album.cover_art_url
-                        }, cb.closest('.track-row').querySelector('.track-dl-btn'));
-                    }
+                // Handle download selected
+                dlSelected.addEventListener('click', () => {
+                    const qualitySelect = document.getElementById('modal-quality-select');
+                    const quality = qualitySelect ? parseInt(qualitySelect.value) : getQuality();
+                    const checked = modalContent.querySelectorAll('.track-check:checked');
+                    checked.forEach(cb => {
+                        const trackId = cb.value;
+                        const track = album.tracks.find(t => t.track_id === trackId);
+                        if (track) {
+                            downloadTrack({
+                                track_id: track.track_id, title: track.title, artist: track.artist,
+                                album_id: album.album_id, cover_art_url: album.cover_art_url
+                            }, cb.closest('.track-row').querySelector('.track-dl-btn'), quality);
+                        }
+                    });
+                    dlSelected.textContent = 'Queued!';
+                    dlSelected.disabled = true;
                 });
-                dlSelected.textContent = 'Queued!';
-                dlSelected.disabled = true;
-            });
+            }
         }
 
         // ── Artist Detail Modal ─────────────────────────────────────────────
@@ -588,9 +612,19 @@
 
         async function init() {
             try {
-                const res = await fetch('/api/queue/status');
-                if (res.ok) { currentQueue = await res.json(); updateQueueWidget(); }
-            } catch (e) { console.error("Failed to fetch initial queue status", e); }
+                const [qRes, sRes] = await Promise.all([
+                    fetch('/api/queue/status'),
+                    fetch('/api/settings')
+                ]);
+                if (qRes.ok) { currentQueue = await qRes.json(); updateQueueWidget(); }
+                if (sRes.ok) {
+                    const s = await sRes.json();
+                    if (s.default_quality) {
+                        globalQuality.value = String(s.default_quality);
+                        playlistQualityCache = s.default_quality;
+                    }
+                }
+            } catch (e) { console.error("Failed to initialize state", e); }
             connectSSE();
         }
 
@@ -615,10 +649,10 @@
                     <div class="quality-bar" style="justify-content:flex-start">
                         <label>Quality:</label>
                         <select id="import-quality" class="quality-select">
-                            <option value="1">MP3 320</option>
-                            <option value="2">CD 16-bit</option>
-                            <option value="3" selected>Hi-Res 24-bit</option>
-                            <option value="4">Hi-Res+ 24/192</option>
+                            <option value="1" ${playlistQualityCache === 1 ? 'selected' : ''}>MP3 320</option>
+                            <option value="2" ${playlistQualityCache === 2 ? 'selected' : ''}>CD 16-bit</option>
+                            <option value="3" ${playlistQualityCache === 3 ? 'selected' : ''}>Hi-Res 24-bit</option>
+                            <option value="4" ${playlistQualityCache === 4 ? 'selected' : ''}>Hi-Res+ 24/192</option>
                         </select>
                     </div>
                     <button class="btn-analyze" id="btn-analyze-playlist">Analyze Playlist</button>
@@ -890,6 +924,15 @@
                     <button id="settings-close-btn" class="modal-close" style="position:static;transform:none">✕</button>
                 </div>
                 <div style="margin-bottom:1rem">
+                    <label style="display:block;font-size:0.8rem;font-weight:500;margin-bottom:0.4rem">Default Download Quality</label>
+                    <select id="settings-default-quality"
+                        style="width:100%;box-sizing:border-box;background:var(--surface-2,#1a1a2e);border:1px solid var(--border,rgba(255,255,255,0.1));border-radius:8px;padding:0.6rem 0.75rem;color:var(--text-primary,#fff);font-size:0.875rem;outline:none;margin-bottom:1.25rem">
+                        <option value="1">1 – MP3 320 kbps</option>
+                        <option value="2">2 – CD Quality (16-bit / 44.1kHz)</option>
+                        <option value="3" selected>3 – Hi-Res (24-bit / ≤96kHz)</option>
+                        <option value="4">4 – Hi-Res+ (24-bit / ≤192kHz)</option>
+                    </select>
+
                     <p style="font-size:0.78rem;color:var(--text-muted);margin:0 0 1rem">
                         Configure Jellyfin integration to auto-scan your library and upload playlist artwork after imports.
                     </p>
@@ -911,12 +954,13 @@
     <script>
     // Settings modal logic
     (function() {
-        const overlay = document.getElementById('settings-overlay');
-        const closeBtn = document.getElementById('settings-close-btn');
-        const saveBtn  = document.getElementById('settings-save-btn');
-        const urlInput = document.getElementById('settings-jf-url');
-        const keyInput = document.getElementById('settings-jf-key');
-        const status   = document.getElementById('settings-jf-status');
+        const overlay       = document.getElementById('settings-overlay');
+        const closeBtn      = document.getElementById('settings-close-btn');
+        const saveBtn       = document.getElementById('settings-save-btn');
+        const urlInput      = document.getElementById('settings-jf-url');
+        const keyInput      = document.getElementById('settings-jf-key');
+        const qualitySelect = document.getElementById('settings-default-quality');
+        const status        = document.getElementById('settings-jf-status');
 
         document.getElementById('settings-btn').addEventListener('click', async () => {
             overlay.classList.add('active');
@@ -926,6 +970,7 @@
                 if (res.ok) {
                     const s = await res.json();
                     urlInput.value = s.jellyfin_url || '';
+                    qualitySelect.value = String(s.default_quality || 3);
                     keyInput.placeholder = s.jellyfin_configured
                         ? (s.jellyfin_api_key_masked || 'API key saved')
                         : 'Paste your API key';
@@ -939,6 +984,7 @@
         saveBtn.addEventListener('click', async () => {
             const url = urlInput.value.trim();
             const key = keyInput.value.trim();
+            const quality = parseInt(qualitySelect.value, 10);
             saveBtn.disabled = true;
             saveBtn.textContent = 'Saving…';
             status.style.color = 'var(--text-muted)';
@@ -947,12 +993,18 @@
                 const res = await fetch('/api/settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ jellyfin_url: url, jellyfin_api_key: key }),
+                    body: JSON.stringify({
+                        jellyfin_url: url,
+                        jellyfin_api_key: key,
+                        default_quality: quality,
+                    }),
                 });
                 if (res.ok) {
                     status.style.color = 'var(--success, #4ade80)';
                     status.textContent = '✓ Settings saved';
                     if (!key) keyInput.placeholder = 'Paste your API key';
+                    globalQuality.value = String(quality);
+                    playlistQualityCache = quality;
                 } else {
                     const err = await res.json().catch(() => ({}));
                     status.style.color = 'var(--error, #f87171)';

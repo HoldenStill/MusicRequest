@@ -56,6 +56,7 @@ MUSIC_DIR = _get_default_music_dir()
 SEARCH_LIMIT = int(os.environ.get("SEARCH_LIMIT", "10"))
 JELLYFIN_URL = os.environ.get("JELLYFIN_URL", "")
 JELLYFIN_API_KEY = os.environ.get("JELLYFIN_API_KEY", "")
+DEFAULT_QUALITY = int(os.environ.get("DEFAULT_QUALITY", os.environ.get("QOBUZ_QUALITY", "3")))
 
 # Resolve paths relative to this file so it works in Docker AND local dev
 _BASE_DIR = Path(__file__).resolve().parent
@@ -155,6 +156,7 @@ class PlaylistImportRequest(BaseModel):
 class SettingsRequest(BaseModel):
     jellyfin_url: str = ""
     jellyfin_api_key: str = ""
+    default_quality: int = 3
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -368,6 +370,7 @@ def _load_settings() -> dict[str, Any]:
     settings: dict[str, Any] = {
         "jellyfin_url": JELLYFIN_URL,
         "jellyfin_api_key": JELLYFIN_API_KEY,
+        "default_quality": DEFAULT_QUALITY,
     }
     if _SETTINGS_FILE.exists():
         try:
@@ -387,15 +390,17 @@ async def get_settings() -> dict[str, Any]:
         "jellyfin_url": s.get("jellyfin_url", ""),
         "jellyfin_api_key_masked": masked_key,
         "jellyfin_configured": bool(s.get("jellyfin_url") and s.get("jellyfin_api_key")),
+        "default_quality": s.get("default_quality", DEFAULT_QUALITY),
     }
 
 
 @app.post("/api/settings", dependencies=[Depends(require_auth)])
 async def save_settings(body: SettingsRequest) -> dict[str, Any]:
-    """Persist Jellyfin settings and hot-reload the playlist importer."""
+    """Persist settings and hot-reload the playlist importer."""
     settings = {
         "jellyfin_url": body.jellyfin_url.rstrip("/"),
         "jellyfin_api_key": body.jellyfin_api_key,
+        "default_quality": body.default_quality,
     }
     try:
         _SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)

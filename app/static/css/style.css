@@ -148,10 +148,10 @@ body {
 /* ── Filter Pills ────────────────────────────────────────────────────────── */
 .filter-pills {
     display: flex;
+    flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
     margin-top: 1rem;
-    flex-wrap: wrap;
 }
 
 .filter-pill {

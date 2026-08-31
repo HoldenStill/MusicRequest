@@ -1,13 +1,25 @@
+# Python virtualenvs & cache
 venv/
 .venv/
 env/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+app/test_*.py
+
+# Git & IDE configs
 .git/
 .gitignore
 .dockerignore
 .vscode/
 .idea/
 *.md
+
+# Local media, configs & secrets
+music/
+config/
+*.log
+scratch/
+

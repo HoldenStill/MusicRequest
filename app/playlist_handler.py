@@ -36,15 +36,15 @@ QOBUZ_PLAYLIST_RE = re.compile(
 
 # ── Normalization helpers ────────────────────────────────────────────────────
 _BRACKET_RE = re.compile(r"\s*[\(\[\{].*?[\)\]\}]\s*")
-_FEAT_RE = re.compile(r"\s*(?:feat\.?|ft\.?|featuring|with)\s+.*", re.IGNORECASE)
+_FEAT_RE = re.compile(r"\s*(?:feat\.?|ft\.?|featuring)\s+.*", re.IGNORECASE)
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9 ]")
 _MULTI_SPACE_RE = re.compile(r"\s+")
 _ARTIST_SPLIT_RE = re.compile(
-    r"\s*(?:,|&|/|;|\\|\bx\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b)\s*",
+    r"\s*(?:,|&|/|;|\\|\bx\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b)\s*",
     re.IGNORECASE,
 )
 _TITLE_SUFFIX_RE = re.compile(
-    r"\s*-\s*(?:remaster(?:ed)?(?:\s*\d+)?|radio edit|explicit(?: version)?|single version|album version|live(?: at .*)?|acoustic|bonus track|from\s+.*|theme from\s+.*|motion picture\s+.*|soundtrack\s+.*|original mix|extended mix|club mix|with\s+.*|feat\.?\s+.*|ft\.?\s+.*).*$",
+    r"\s*-\s*(?:remaster(?:ed)?(?:\s*\d+)?|radio edit|explicit(?: version)?|single version|album version|live(?: at .*)?|acoustic|bonus track|from\s+.*|theme from\s+.*|motion picture\s+.*|soundtrack\s+.*|original mix|extended mix|club mix|feat\.?\s+.*|ft\.?\s+.*).*$",
     re.IGNORECASE,
 )
 
@@ -75,6 +75,18 @@ def _normalize(text: str) -> str:
     return text
 
 
+def _clean_text_basic(text: str) -> str:
+    """Basic clean without stripping brackets or words (lowercase, accents, non-alnum)."""
+    if not text or not isinstance(text, str):
+        return ""
+    text = text.lower().strip()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = _NON_ALNUM_RE.sub(" ", text)
+    text = _MULTI_SPACE_RE.sub(" ", text).strip()
+    return text
+
+
 def _extract_artist_variants(artist_str: str) -> list[str]:
     """Extract individual artist names and combinations from an artist string."""
     if not artist_str or not isinstance(artist_str, str):
@@ -87,7 +99,13 @@ def _extract_artist_variants(artist_str: str) -> list[str]:
         if raw_norm.startswith("the "):
             variants.add(raw_norm[4:].strip())
 
-    # Split by delimiters (commas, &, feat, with, etc.)
+    basic_norm = _clean_text_basic(artist_str)
+    if basic_norm:
+        variants.add(basic_norm)
+        if basic_norm.startswith("the "):
+            variants.add(basic_norm[4:].strip())
+
+    # Split by delimiters (commas, &, feat, etc.)
     parts = _ARTIST_SPLIT_RE.split(artist_str)
     for part in parts:
         part_norm = _normalize(part)
@@ -101,6 +119,8 @@ def _extract_artist_variants(artist_str: str) -> list[str]:
         primary = _normalize(parts[0])
         if primary:
             variants.add(primary)
+            if primary.startswith("the "):
+                variants.add(primary[4:].strip())
 
     return [v for v in variants if v]
 
@@ -115,6 +135,10 @@ def _get_title_variants(title_str: str) -> list[str]:
     if raw_norm:
         variants.add(raw_norm)
 
+    basic_norm = _clean_text_basic(title_str)
+    if basic_norm:
+        variants.add(basic_norm)
+
     # Strip suffix after hyphen (e.g., " - Remastered 2011", " - Radio Edit")
     suffix_stripped = _TITLE_SUFFIX_RE.sub("", title_str)
     s_norm = _normalize(suffix_stripped)
@@ -126,6 +150,10 @@ def _get_title_variants(title_str: str) -> list[str]:
     b_norm = _normalize(bracket_stripped)
     if b_norm:
         variants.add(b_norm)
+
+    b_suffix = _clean_text_basic(suffix_stripped)
+    if b_suffix:
+        variants.add(b_suffix)
 
     return [v for v in variants if v]
 
@@ -155,6 +183,30 @@ def _get_safe_playlist_name(name: str) -> str:
 def _make_index_key(artist: str, title: str) -> str:
     """Create a primary normalized lookup key from artist + title."""
     return f"{_normalize(artist)}::{_normalize(title)}"
+
+
+def _format_m3u8_relative_path(audio_path_str: str, music_dir: str, playlist_dir: Path) -> str:
+    """Format an audio file path as a clean relative path from playlist_dir for Jellyfin/m3u8."""
+    clean_audio = audio_path_str.replace("\\", "/").rstrip("/")
+    clean_music = str(music_dir).replace("\\", "/").rstrip("/")
+
+    # Check if audio path starts with music_dir
+    if clean_audio.startswith(clean_music + "/"):
+        subpath = clean_audio[len(clean_music) + 1:]
+        return f"../../{subpath}"
+
+    # Check if audio path came from Jellyfin with common mount prefixes
+    for prefix in ["/music", "/media/music", "/media", "/mnt/music", "/data/music"]:
+        if prefix and clean_audio.startswith(prefix + "/"):
+            subpath = clean_audio[len(prefix) + 1:]
+            return f"../../{subpath}"
+
+    # Standard relpath calculation
+    try:
+        rel = os.path.relpath(Path(audio_path_str), playlist_dir).replace("\\", "/")
+        return rel
+    except Exception:
+        return clean_audio
 
 
 # ── Data Classes ─────────────────────────────────────────────────────────────
@@ -483,66 +535,94 @@ class PlaylistImporter:
         return await asyncio.to_thread(self._scan_library_sync)
 
     def _scan_library_sync(self) -> dict[str, Any]:
-        """Synchronous library scanner using mutagen."""
+        """Synchronous library scanner using mutagen and filesystem fallbacks."""
         import mutagen
 
         keys_index: dict[str, str] = {}
         titles_index: dict[str, list[tuple[str, str]]] = {}
+        all_files: list[str] = []
         music_path = Path(self.music_dir)
         if not music_path.exists():
             logger.warning(f"Music directory does not exist: {self.music_dir}")
-            return {"keys": keys_index, "titles": titles_index}
+            return {"keys": keys_index, "titles": titles_index, "files": all_files}
 
         audio_exts = {".flac", ".mp3", ".ogg", ".m4a", ".opus", ".wma", ".wav", ".aac"}
         scanned = 0
         errors = 0
 
-        for filepath in music_path.rglob("*"):
-            if filepath.suffix.lower() not in audio_exts:
-                continue
-            try:
-                tags = mutagen.File(str(filepath), easy=True)
-                if tags is None:
+        for root, _, files in os.walk(str(music_path), followlinks=True):
+            for file in files:
+                ext = os.path.splitext(file)[1].lower()
+                if ext not in audio_exts:
                     continue
+                filepath = os.path.join(root, file)
+                all_files.append(filepath)
+                try:
+                    titles: list[str] = []
+                    artists: list[str] = []
 
-                # Extract all artists and titles from tags
-                titles: list[str] = []
-                artists: list[str] = []
-                if hasattr(tags, "get"):
-                    raw_titles = tags.get("title", [])
-                    titles = [t for t in raw_titles if isinstance(t, str) and t]
-                    raw_artists = tags.get("artist", [])
-                    album_artists = tags.get("albumartist", [])
-                    for a in list(raw_artists) + list(album_artists):
-                        if isinstance(a, str) and a and a not in artists:
-                            artists.append(a)
+                    # 1. Try reading tags with mutagen
+                    tags = None
+                    try:
+                        tags = mutagen.File(filepath, easy=True)
+                    except Exception:
+                        pass
 
-                if not titles or not artists:
+                    if tags is not None and hasattr(tags, "get"):
+                        for t_key in ["title", "TITLE", "TIT2", "\xa9nam"]:
+                            raw_t = tags.get(t_key, [])
+                            if raw_t:
+                                for item in (raw_t if isinstance(raw_t, (list, tuple)) else [raw_t]):
+                                    if isinstance(item, str) and item.strip() and item.strip() not in titles:
+                                        titles.append(item.strip())
+                        for a_key in ["artist", "ARTIST", "albumartist", "ALBUMARTIST", "TPE1", "TPE2", "\xa9ART", "aART"]:
+                            raw_a = tags.get(a_key, [])
+                            if raw_a:
+                                for item in (raw_a if isinstance(raw_a, (list, tuple)) else [raw_a]):
+                                    if isinstance(item, str) and item.strip() and item.strip() not in artists:
+                                        artists.append(item.strip())
+
+                    # 2. Fallback: Parse from filename and folder structure
+                    filename_no_ext = os.path.splitext(file)[0]
+                    # Strip leading track number e.g. "01 - " or "01 " or "1. "
+                    clean_file_title = re.sub(r"^\d+[\s\.\-_]+", "", filename_no_ext).strip()
+                    if clean_file_title and clean_file_title not in titles:
+                        titles.append(clean_file_title)
+
+                    parent_folder = os.path.basename(root)
+                    grandparent_folder = os.path.basename(os.path.dirname(root))
+                    if grandparent_folder and grandparent_folder not in ("music", "Music", "Playlists", ""):
+                        if grandparent_folder not in artists:
+                            artists.append(grandparent_folder)
+                    if parent_folder and parent_folder not in ("music", "Music", "Playlists", ""):
+                        if parent_folder not in artists:
+                            artists.append(parent_folder)
+
+                    if not titles:
+                        continue
+
+                    path_str = str(filepath)
+                    for t in titles:
+                        for a in artists:
+                            for k in _make_lookup_keys(a, t):
+                                keys_index[k] = path_str
+                            for t_var in _get_title_variants(t):
+                                norm_var = _normalize(t_var)
+                                if norm_var:
+                                    if norm_var not in titles_index:
+                                        titles_index[norm_var] = []
+                                    titles_index[norm_var].append((a, path_str))
+
+                    scanned += 1
+                except Exception:
+                    errors += 1
                     continue
-
-                path_str = str(filepath)
-                for t in titles:
-                    for a in artists:
-                        # Generate all key permutations
-                        for k in _make_lookup_keys(a, t):
-                            keys_index[k] = path_str
-                        # Populate title index for fuzzy fallback
-                        for t_var in _get_title_variants(t):
-                            norm_var = _normalize(t_var)
-                            if norm_var not in titles_index:
-                                titles_index[norm_var] = []
-                            titles_index[norm_var].append((a, path_str))
-
-                scanned += 1
-            except Exception:
-                errors += 1
-                continue
 
         logger.info(
             f"Library scan complete: {scanned} tracks indexed, {errors} errors, "
             f"{len(keys_index)} lookup keys generated"
         )
-        return {"keys": keys_index, "titles": titles_index}
+        return {"keys": keys_index, "titles": titles_index, "files": all_files}
 
     # ── Jellyfin Library Index ───────────────────────────────────────────────
     async def _build_jellyfin_index(self) -> dict[str, Any] | None:
@@ -572,11 +652,14 @@ class PlaylistImporter:
 
             keys_index: dict[str, str] = {}
             titles_index: dict[str, list[tuple[str, str]]] = {}
+            all_files: list[str] = []
             for item in data.get("Items", []):
                 title = item.get("Name", "")
                 artists = item.get("Artists", [])
                 album_artist = item.get("AlbumArtist", "")
                 path = item.get("Path", "")
+                if path:
+                    all_files.append(path)
 
                 all_artists: list[str] = [a for a in artists if isinstance(a, str) and a]
                 if album_artist and album_artist not in all_artists:
@@ -588,12 +671,13 @@ class PlaylistImporter:
                             keys_index[k] = path
                     for t_var in _get_title_variants(title):
                         norm_var = _normalize(t_var)
-                        if norm_var not in titles_index:
-                            titles_index[norm_var] = []
-                        titles_index[norm_var].append((all_artists[0], path))
+                        if norm_var:
+                            if norm_var not in titles_index:
+                                titles_index[norm_var] = []
+                            titles_index[norm_var].append((all_artists[0], path))
 
             logger.info(f"Jellyfin index built: {len(keys_index)} lookup keys")
-            return {"keys": keys_index, "titles": titles_index}
+            return {"keys": keys_index, "titles": titles_index, "files": all_files}
         except Exception as e:
             logger.warning(f"Failed to query Jellyfin: {e}")
             return None
@@ -630,7 +714,7 @@ class PlaylistImporter:
             if k in direct_keys:
                 return direct_keys[k]
 
-        # 3. Fuzzy title match fallback
+        # 3. Title index exact & variant matching
         if title_index:
             title_candidates = _get_title_variants(track.title)
             if track.matched_title:
@@ -642,12 +726,39 @@ class PlaylistImporter:
 
             for t_var in title_candidates:
                 norm_t = _normalize(t_var)
+                if not norm_t:
+                    continue
                 candidates = title_index.get(norm_t, [])
                 for cand_artist, cand_path in candidates:
                     cand_artist_norm = _normalize(cand_artist)
                     for a_var in artist_variants:
                         if a_var == cand_artist_norm or a_var in cand_artist_norm or cand_artist_norm in a_var:
                             return cand_path
+
+        # 4. Fallback search across title_index for partial / substring title match
+        if title_index:
+            clean_titles = [_clean_text_basic(v) for v in (track.title, track.matched_title) if v]
+            clean_artists = [_clean_text_basic(v) for v in (track.artist, track.matched_artist) if v]
+            for ct in clean_titles:
+                if len(ct) < 3:
+                    continue
+                for idx_title, candidates in title_index.items():
+                    if ct == idx_title or ct in idx_title or idx_title in ct:
+                        for cand_artist, cand_path in candidates:
+                            cand_a_clean = _clean_text_basic(cand_artist)
+                            for ca in clean_artists:
+                                if ca in cand_a_clean or cand_a_clean in ca or any(p in cand_a_clean for p in ca.split() if len(p) > 3):
+                                    return cand_path
+
+        # 5. Filepath search fallback across all scanned files
+        all_files = library_index.get("files", [])
+        if all_files:
+            search_title = _clean_text_basic(track.matched_title or track.title)
+            if len(search_title) >= 3:
+                for fpath in all_files:
+                    clean_fpath = _clean_text_basic(fpath)
+                    if search_title in clean_fpath:
+                        return fpath
 
         return None
 
@@ -889,6 +1000,18 @@ class PlaylistImporter:
                     track.is_local = True
                     track.local_path = path
 
+            # Ensure all tracks that completed downloading in this batch are resolved
+            for track, dl_job in download_jobs:
+                if dl_job.status == "completed" and (not track.is_local or not track.local_path):
+                    path = self._resolve_track_path(track, library_index)
+                    if path:
+                        track.is_local = True
+                        track.local_path = path
+                    else:
+                        logger.warning(
+                            f"Track '{track.title}' was downloaded but path was not resolved by index."
+                        )
+
             # Free the index
             del library_index
             gc.collect()
@@ -951,23 +1074,14 @@ class PlaylistImporter:
             if not track.is_local or not track.local_path:
                 continue
 
-            # Calculate relative path from playlist dir to the audio file
-            try:
-                audio_path = Path(track.local_path)
-                rel_path = os.path.relpath(audio_path, playlist_dir)
-                # Use forward slashes for cross-platform compatibility
-                rel_path = rel_path.replace("\\", "/")
-            except ValueError:
-                # On Windows, relpath can fail across drives
-                rel_path = track.local_path.replace("\\", "/")
-
+            rel_path = _format_m3u8_relative_path(track.local_path, self.music_dir, playlist_dir)
             duration_s = track.duration_ms // 1000 if track.duration_ms else -1
             lines.append(f"#EXTINF:{duration_s},{track.artist} - {track.title}")
             lines.append(rel_path)
 
         m3u_content = "\n".join(lines) + "\n"
         m3u_path.write_text(m3u_content, encoding="utf-8")
-        logger.info(f"Generated playlist file: {m3u_path}")
+        logger.info(f"Generated playlist file: {m3u_path} ({len(lines) - 2} entries)")
 
     # ── Cover Art Download ───────────────────────────────────────────────────
     async def _download_cover_art(self, playlist: PlaylistInfo) -> tuple[bytes | None, str | None]:
