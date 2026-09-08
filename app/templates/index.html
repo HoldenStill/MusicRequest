@@ -762,6 +762,10 @@
             const matchedCount = data.tracks.filter(t => !t.is_local && t.qobuz_track_id).length;
             const unmatchedCount = data.missing_tracks - matchedCount;
 
+            const dlBtnText = matchedCount > 0 
+                ? `Download Missing (${matchedCount})` 
+                : (data.local_tracks > 0 ? `Generate Playlist (${data.local_tracks} local tracks)` : `No Tracks to Download`);
+
             modalContent.innerHTML = `
                 <div class="playlist-header">
                     <button class="modal-close" id="modal-close-btn">✕</button>
@@ -773,22 +777,24 @@
                         <div class="playlist-stats">
                             <span class="stat-item"><strong>${data.total_tracks}</strong> total</span>
                             <span class="stat-item local"><strong>${data.local_tracks}</strong> local</span>
-                            <span class="stat-item missing"><strong>${matchedCount}</strong> matched</span>
-                            ${unmatchedCount > 0 ? `<span class="stat-item" style="color:var(--warning)"><strong>${unmatchedCount}</strong> no match</span>` : ''}
+                            <span class="stat-item missing"><strong>${matchedCount}</strong> matched for download</span>
+                            ${unmatchedCount > 0 ? `<span class="stat-item" style="color:var(--warning)"><strong>${unmatchedCount}</strong> not on Qobuz</span>` : ''}
                         </div>
                     </div>
                 </div>
                 <div class="playlist-actions">
-                    <button class="btn btn-download" id="pl-dl-all-missing">
-                        Download All Missing (${matchedCount})
+                    <button class="btn btn-download" id="pl-dl-all-missing" ${matchedCount === 0 && data.local_tracks === 0 ? 'disabled' : ''}>
+                        ${dlBtnText}
                     </button>
+                    ${matchedCount > 0 ? `
                     <button class="btn btn-secondary" id="pl-dl-selected" disabled>
                         Download Selected (0)
                     </button>
-                    <label style="display:flex;align-items:center;gap:6px;margin-left:auto">
+                    <label style="display:flex;align-items:center;gap:6px;margin-left:auto;font-size:0.85rem;color:var(--text-muted)">
                         <input type="checkbox" id="pl-select-all" checked
-                               style="width:16px;height:16px;cursor:pointer"> All matched
+                               style="width:16px;height:16px;cursor:pointer"> Select all
                     </label>
+                    ` : ''}
                 </div>
                 <div class="playlist-tracklist">${tracksHtml}</div>
             `;
@@ -802,16 +808,19 @@
             const dlAllMissing = document.getElementById('pl-dl-all-missing');
 
             const updateCount = () => {
+                if (!dlSelected) return;
                 const checked = modalContent.querySelectorAll('.pl-track-check:checked');
                 dlSelected.disabled = checked.length === 0;
                 dlSelected.textContent = `Download Selected (${checked.length})`;
             };
 
             checkboxes.forEach(cb => cb.addEventListener('change', updateCount));
-            selectAll.addEventListener('change', (e) => {
-                checkboxes.forEach(cb => { cb.checked = e.target.checked; });
-                updateCount();
-            });
+            if (selectAll) {
+                selectAll.addEventListener('change', (e) => {
+                    checkboxes.forEach(cb => { cb.checked = e.target.checked; });
+                    updateCount();
+                });
+            }
 
             // Click row to toggle
             modalContent.querySelectorAll('.pl-track-row.is-missing').forEach(row => {
@@ -825,20 +834,27 @@
                 });
             });
 
-            // Download All Missing
+            // Download All Missing / Generate Playlist
             dlAllMissing.addEventListener('click', () => {
-                const allIndices = data.tracks
-                    .map((t, i) => (!t.is_local && t.qobuz_track_id) ? i : -1)
-                    .filter(i => i >= 0);
-                startPlaylistImport(allIndices);
+                if (matchedCount > 0) {
+                    const allIndices = data.tracks
+                        .map((t, i) => (!t.is_local && t.qobuz_track_id) ? i : -1)
+                        .filter(i => i >= 0);
+                    startPlaylistImport(allIndices);
+                } else if (data.local_tracks > 0) {
+                    // Generate playlist file for local tracks
+                    startPlaylistImport([]);
+                }
             });
 
             // Download Selected
-            dlSelected.addEventListener('click', () => {
-                const checked = modalContent.querySelectorAll('.pl-track-check:checked');
-                const indices = Array.from(checked).map(cb => parseInt(cb.value, 10));
-                startPlaylistImport(indices);
-            });
+            if (dlSelected) {
+                dlSelected.addEventListener('click', () => {
+                    const checked = modalContent.querySelectorAll('.pl-track-check:checked');
+                    const indices = Array.from(checked).map(cb => parseInt(cb.value, 10));
+                    startPlaylistImport(indices);
+                });
+            }
 
             updateCount();
         }
@@ -1003,16 +1019,23 @@
                     status.style.color = 'var(--success, #4ade80)';
                     status.textContent = '✓ Settings saved';
                     if (!key) keyInput.placeholder = 'Paste your API key';
-                    globalQuality.value = String(quality);
-                    playlistQualityCache = quality;
+                    // Sync the global quality selector (lives in outer script scope)
+                    const gq = document.getElementById('global-quality');
+                    if (gq) gq.value = String(quality);
                 } else {
-                    const err = await res.json().catch(() => ({}));
+                    const text = await res.text().catch(() => '');
+                    let errMsg = 'Save failed (' + res.status + ')';
+                    try {
+                        const err = JSON.parse(text);
+                        if (err.detail) errMsg = err.detail;
+                    } catch {}
                     status.style.color = 'var(--error, #f87171)';
-                    status.textContent = '✗ ' + (err.detail || 'Save failed');
+                    status.textContent = '✗ ' + errMsg;
                 }
             } catch (e) {
+                console.error("Save settings error:", e);
                 status.style.color = 'var(--error, #f87171)';
-                status.textContent = '✗ Network error';
+                status.textContent = '✗ ' + (e && e.message ? e.message : 'Network error');
             } finally {
                 saveBtn.disabled = false;
                 saveBtn.textContent = 'Save';

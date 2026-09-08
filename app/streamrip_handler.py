@@ -654,7 +654,7 @@ class StreamripHandler:
                         text=True
                     )
 
-                    if process.returncode == 0:
+                    if process.returncode == 0 and "ERROR" not in process.stdout and "ERROR" not in process.stderr:
                         job.status = "completed"
                         logger.info(f"Download completed successfully: {job.title}")
                     else:
@@ -662,7 +662,16 @@ class StreamripHandler:
                         # Improve error messages
                         stderr_output = process.stderr.strip()
                         stdout_output = process.stdout.strip()
-                        if stderr_output:
+                        
+                        error_msg = ""
+                        for line in stdout_output.split("\n") + stderr_output.split("\n"):
+                            if "ERROR" in line or "Exception" in line:
+                                error_msg = line.strip()
+                                break
+                        
+                        if error_msg:
+                            job.error = f"Download failed: {error_msg[:200]}"
+                        elif stderr_output:
                             job.error = f"Download failed: {stderr_output[:200]}..."
                         elif stdout_output:
                             job.error = f"Download failed: {stdout_output[:200]}..."

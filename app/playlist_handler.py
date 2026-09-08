@@ -570,13 +570,19 @@ class PlaylistImporter:
 
                     if tags is not None and hasattr(tags, "get"):
                         for t_key in ["title", "TITLE", "TIT2", "\xa9nam"]:
-                            raw_t = tags.get(t_key, [])
+                            try:
+                                raw_t = tags.get(t_key, [])
+                            except Exception:
+                                raw_t = []
                             if raw_t:
                                 for item in (raw_t if isinstance(raw_t, (list, tuple)) else [raw_t]):
                                     if isinstance(item, str) and item.strip() and item.strip() not in titles:
                                         titles.append(item.strip())
                         for a_key in ["artist", "ARTIST", "albumartist", "ALBUMARTIST", "TPE1", "TPE2", "\xa9ART", "aART"]:
-                            raw_a = tags.get(a_key, [])
+                            try:
+                                raw_a = tags.get(a_key, [])
+                            except Exception:
+                                raw_a = []
                             if raw_a:
                                 for item in (raw_a if isinstance(raw_a, (list, tuple)) else [raw_a]):
                                     if isinstance(item, str) and item.strip() and item.strip() not in artists:
@@ -693,36 +699,40 @@ class PlaylistImporter:
         direct_keys: dict[str, str] = library_index.get("keys", library_index)
         title_index: dict[str, list[tuple[str, str]]] = library_index.get("titles", {})
 
-        # 1. Try all lookup keys from original artist/title
+        # 1. Try direct lookup keys from original artist/title (HIGHEST PRIORITY)
         keys_to_try = _make_lookup_keys(track.artist, track.title)
-
-        # 2. Try lookup keys from matched Qobuz artist/title if available
-        if track.matched_artist or track.matched_title:
-            m_artist = track.matched_artist or track.artist
-            m_title = track.matched_title or track.title
-            for k in _make_lookup_keys(m_artist, m_title):
-                if k not in keys_to_try:
-                    keys_to_try.append(k)
-            for k in _make_lookup_keys(track.artist, m_title):
-                if k not in keys_to_try:
-                    keys_to_try.append(k)
-            for k in _make_lookup_keys(m_artist, track.title):
-                if k not in keys_to_try:
-                    keys_to_try.append(k)
-
         for k in keys_to_try:
             if k in direct_keys:
                 return direct_keys[k]
 
-        # 3. Title index exact & variant matching
+        # 2. Try direct lookup keys from matched Qobuz artist/title as secondary fallback
+        if track.matched_artist or track.matched_title:
+            m_artist = track.matched_artist or track.artist
+            m_title = track.matched_title or track.title
+            m_keys = []
+            for k in _make_lookup_keys(m_artist, m_title):
+                if k not in keys_to_try and k not in m_keys:
+                    m_keys.append(k)
+            for k in _make_lookup_keys(track.artist, m_title):
+                if k not in keys_to_try and k not in m_keys:
+                    m_keys.append(k)
+            for k in m_keys:
+                if k in direct_keys:
+                    return direct_keys[k]
+
+        # 3. Title index exact & variant matching (scored: pick best artist match)
         if title_index:
             title_candidates = _get_title_variants(track.title)
             if track.matched_title:
-                title_candidates.extend(_get_title_variants(track.matched_title))
+                for tv in _get_title_variants(track.matched_title):
+                    if tv not in title_candidates:
+                        title_candidates.append(tv)
 
             artist_variants = _extract_artist_variants(track.artist)
-            if track.matched_artist:
-                artist_variants.extend(_extract_artist_variants(track.matched_artist))
+            m_artist_variants = _extract_artist_variants(track.matched_artist) if track.matched_artist else []
+
+            best_path: str | None = None
+            best_artist_score: float = 0.0
 
             for t_var in title_candidates:
                 norm_t = _normalize(t_var)
@@ -731,34 +741,102 @@ class PlaylistImporter:
                 candidates = title_index.get(norm_t, [])
                 for cand_artist, cand_path in candidates:
                     cand_artist_norm = _normalize(cand_artist)
+                    # Check original artist variants first (weight 1.0)
                     for a_var in artist_variants:
-                        if a_var == cand_artist_norm or a_var in cand_artist_norm or cand_artist_norm in a_var:
-                            return cand_path
+                        score = 0.0
+                        if a_var == cand_artist_norm:
+                            score = 1.0
+                        elif len(a_var) >= 3 and len(cand_artist_norm) >= 3:
+                            longer = max(len(a_var), len(cand_artist_norm))
+                            shorter = min(len(a_var), len(cand_artist_norm))
+                            if a_var in cand_artist_norm or cand_artist_norm in a_var:
+                                ratio = shorter / longer
+                                if ratio >= 0.6:
+                                    score = ratio
+                        if score > best_artist_score:
+                            best_artist_score = score
+                            best_path = cand_path
 
-        # 4. Fallback search across title_index for partial / substring title match
+                    # Check matched artist variants as secondary fallback (weight 0.85)
+                    for ma_var in m_artist_variants:
+                        score = 0.0
+                        if ma_var == cand_artist_norm:
+                            score = 0.85
+                        elif len(ma_var) >= 3 and len(cand_artist_norm) >= 3:
+                            longer = max(len(ma_var), len(cand_artist_norm))
+                            shorter = min(len(ma_var), len(cand_artist_norm))
+                            if ma_var in cand_artist_norm or cand_artist_norm in ma_var:
+                                ratio = shorter / longer
+                                if ratio >= 0.6:
+                                    score = ratio * 0.85
+                        if score > best_artist_score:
+                            best_artist_score = score
+                            best_path = cand_path
+
+            if best_path and best_artist_score >= 0.5:
+                return best_path
+
+        # 4. Fuzzy title substring fallback (strict: requires >=5 chars and strong artist validation)
         if title_index:
             clean_titles = [_clean_text_basic(v) for v in (track.title, track.matched_title) if v]
             clean_artists = [_clean_text_basic(v) for v in (track.artist, track.matched_artist) if v]
+
+            best_fuzzy_path: str | None = None
+            best_fuzzy_score: float = 0.0
+
             for ct in clean_titles:
-                if len(ct) < 3:
+                if len(ct) < 5:
                     continue
                 for idx_title, candidates in title_index.items():
-                    if ct == idx_title or ct in idx_title or idx_title in ct:
-                        for cand_artist, cand_path in candidates:
-                            cand_a_clean = _clean_text_basic(cand_artist)
-                            for ca in clean_artists:
-                                if ca in cand_a_clean or cand_a_clean in ca or any(p in cand_a_clean for p in ca.split() if len(p) > 3):
-                                    return cand_path
+                    title_match = False
+                    if ct == idx_title:
+                        title_match = True
+                    elif ct in idx_title or idx_title in ct:
+                        longer_t = max(len(ct), len(idx_title))
+                        shorter_t = min(len(ct), len(idx_title))
+                        if shorter_t / longer_t >= 0.7:
+                            title_match = True
+                    if not title_match:
+                        continue
 
-        # 5. Filepath search fallback across all scanned files
+                    for cand_artist, cand_path in candidates:
+                        cand_a_clean = _clean_text_basic(cand_artist)
+                        for ca in clean_artists:
+                            score = 0.0
+                            if ca == cand_a_clean:
+                                score = 1.0
+                            elif len(ca) >= 3 and len(cand_a_clean) >= 3:
+                                if ca in cand_a_clean or cand_a_clean in ca:
+                                    longer_a = max(len(ca), len(cand_a_clean))
+                                    shorter_a = min(len(ca), len(cand_a_clean))
+                                    if shorter_a / longer_a >= 0.5:
+                                        score = shorter_a / longer_a
+                            if score > best_fuzzy_score:
+                                best_fuzzy_score = score
+                                best_fuzzy_path = cand_path
+
+            if best_fuzzy_path and best_fuzzy_score >= 0.5:
+                return best_fuzzy_path
+
+        # 5. Filepath filename search fallback (strict: match filename AND verify artist folder)
         all_files = library_index.get("files", [])
         if all_files:
             search_title = _clean_text_basic(track.matched_title or track.title)
-            if len(search_title) >= 3:
+            clean_artists = [_clean_text_basic(v) for v in (track.artist, track.matched_artist) if v]
+            if len(search_title) >= 8:
                 for fpath in all_files:
-                    clean_fpath = _clean_text_basic(fpath)
-                    if search_title in clean_fpath:
-                        return fpath
+                    fname = _clean_text_basic(os.path.splitext(os.path.basename(fpath))[0])
+                    fname = re.sub(r"^\d+[\s.\-_]+", "", fname).strip()
+                    if not fname:
+                        continue
+                    if search_title in fname or fname in search_title:
+                        longer_f = max(len(search_title), len(fname))
+                        shorter_f = min(len(search_title), len(fname))
+                        if shorter_f / longer_f >= 0.6:
+                            # Verify that the folder path contains at least one artist variant
+                            clean_fpath = _clean_text_basic(fpath)
+                            if any(ca in clean_fpath for ca in clean_artists if len(ca) >= 3):
+                                return fpath
 
         return None
 
@@ -789,18 +867,43 @@ class PlaylistImporter:
 
         Returns True if a match was found.
         """
-        query = f"{track.artist} {track.title}"
-        try:
-            results = await self.handler.search(query, limit=5, media_type="track")
-        except Exception as e:
-            logger.warning(f"Qobuz search failed for '{query}': {e}")
-            return False
+        # 1. Clean primary artist and clean title for high-precision search query
+        artist_parts = _ARTIST_SPLIT_RE.split(track.artist)
+        primary_artist = artist_parts[0].strip() if artist_parts else track.artist.strip()
+
+        # Clean title: strip brackets like "(with Kenny Mason & Project Pat)" or "(feat. ...)"
+        clean_title = _BRACKET_RE.sub(" ", track.title).strip()
+        clean_title = _TITLE_SUFFIX_RE.sub("", clean_title).strip()
+        if not clean_title:
+            clean_title = track.title.strip()
+
+        # Try clean query first, fallback to original query if no results
+        queries_to_try: list[str] = []
+        if primary_artist and clean_title:
+            queries_to_try.append(f"{primary_artist} {clean_title}")
+        orig_q = f"{track.artist} {track.title}".strip()
+        if orig_q not in queries_to_try:
+            queries_to_try.append(orig_q)
+        if primary_artist and track.title != clean_title:
+            queries_to_try.append(f"{primary_artist} {track.title}")
+
+        results: list[dict[str, Any]] = []
+        for query in queries_to_try:
+            try:
+                results = await self.handler.search(query, limit=10, media_type="track")
+                if results:
+                    break
+            except Exception as e:
+                logger.warning(f"Qobuz search failed for '{query}': {e}")
 
         if not results:
             return False
 
-        # Score each result
-        target_duration_s = track.duration_ms / 1000
+        # Extract all artist variants for the requested track
+        track_artist_variants = set(_extract_artist_variants(track.artist))
+
+        # Target duration
+        target_duration_s = track.duration_ms / 1000 if track.duration_ms else 0
         best_score = 0.0
         best_result = None
 
@@ -809,35 +912,69 @@ class PlaylistImporter:
             r_artist = result.get("artist", "")
             r_duration = result.get("duration", 0)
 
+            # Check artist match
+            r_artist_variants = set(_extract_artist_variants(r_artist))
+
+            # Exact or shared artist
+            common_artists = track_artist_variants.intersection(r_artist_variants)
+            if common_artists:
+                artist_match = 1.0
+            else:
+                # Substring/partial artist match
+                best_a_sim = 0.0
+                for a1 in track_artist_variants:
+                    for a2 in r_artist_variants:
+                        if not a1 or not a2:
+                            continue
+                        if a1 == a2:
+                            best_a_sim = 1.0
+                            break
+                        longer = max(len(a1), len(a2))
+                        shorter = min(len(a1), len(a2))
+                        if shorter >= 3 and (a1 in a2 or a2 in a1):
+                            ratio = shorter / longer
+                            if ratio > best_a_sim:
+                                best_a_sim = ratio
+                artist_match = best_a_sim if best_a_sim >= 0.6 else 0.0
+
+            # CRITICAL GUARD: If artist does not match at all, this CANNOT be a match!
+            if artist_match <= 0.0:
+                continue
+
             # Title similarity
-            title_match = 1.0 if _normalize(r_title) == _normalize(track.title) else 0.0
-            if not title_match:
-                # Partial match: check if one contains the other
+            t_candidates = _get_title_variants(track.title)
+            r_t_candidates = _get_title_variants(r_title)
+
+            title_match = 0.0
+            if set(t_candidates).intersection(set(r_t_candidates)):
+                title_match = 1.0
+            else:
                 nt = _normalize(track.title)
                 nr = _normalize(r_title)
-                if nt in nr or nr in nt:
-                    title_match = 0.7
+                if nt and nr:
+                    if nt == nr:
+                        title_match = 1.0
+                    elif nt in nr or nr in nt:
+                        longer_t = max(len(nt), len(nr))
+                        shorter_t = min(len(nt), len(nr))
+                        if shorter_t / longer_t >= 0.6:
+                            title_match = 0.85
 
-            # Artist similarity
-            artist_match = 1.0 if _normalize(r_artist) == _normalize(track.artist) else 0.0
-            if not artist_match:
-                na = _normalize(track.artist)
-                nra = _normalize(r_artist)
-                if na in nra or nra in na:
-                    artist_match = 0.7
+            if title_match <= 0.0:
+                continue
 
-            # Duration similarity (within 4 seconds tolerance)
+            # Duration similarity (within 6 seconds tolerance)
             duration_diff = abs(r_duration - target_duration_s) if target_duration_s > 0 else 0
-            duration_match = 1.0 if duration_diff <= 4 else max(0, 1.0 - duration_diff / 30)
+            duration_match = 1.0 if duration_diff <= 6 else max(0.0, 1.0 - duration_diff / 30)
 
-            score = (title_match * 0.45) + (artist_match * 0.35) + (duration_match * 0.20)
+            score = (title_match * 0.45) + (artist_match * 0.40) + (duration_match * 0.15)
 
             if score > best_score:
                 best_score = score
                 best_result = result
 
-        # Require minimum confidence
-        if best_result and best_score >= 0.5:
+        # Require minimum confidence and strict artist+title match
+        if best_result and best_score >= 0.65:
             track.qobuz_track_id = best_result.get("track_id", "")
             track.qobuz_album_id = best_result.get("album_id", "")
             track.matched_title = best_result.get("title", "")
@@ -901,6 +1038,19 @@ class PlaylistImporter:
             An ImportJob for tracking progress.
         """
         import_id = str(uuid.uuid4())
+
+        # Re-check library right now to catch any tracks added since analysis
+        # and to prevent downloading songs that are already local
+        fresh_index = await self._build_library_index()
+        for track in playlist.tracks:
+            if not track.is_local:
+                path = self._resolve_track_path(track, fresh_index)
+                if path:
+                    track.is_local = True
+                    track.local_path = path
+                    logger.info(f"Track '{track.title}' by '{track.artist}' found locally at import time, skipping download")
+        del fresh_index
+        gc.collect()
 
         # Determine which tracks to download
         tracks_to_download: list[PlaylistTrack] = []
@@ -993,23 +1143,24 @@ class PlaylistImporter:
             # Re-scan library to find newly downloaded files
             library_index = await self._build_library_index()
 
-            # Update track local paths with smart multi-alias resolution
+            # Update tracks that were missing or were just downloaded
             for track in playlist.tracks:
-                path = self._resolve_track_path(track, library_index)
-                if path:
-                    track.is_local = True
-                    track.local_path = path
-
-            # Ensure all tracks that completed downloading in this batch are resolved
-            for track, dl_job in download_jobs:
-                if dl_job.status == "completed" and (not track.is_local or not track.local_path):
+                if not track.is_local or not track.local_path:
                     path = self._resolve_track_path(track, library_index)
                     if path:
                         track.is_local = True
                         track.local_path = path
-                    else:
+
+            # Ensure all tracks that completed downloading in this batch are resolved
+            for track, dl_job in download_jobs:
+                if dl_job.status == "completed":
+                    path = self._resolve_track_path(track, library_index)
+                    if path:
+                        track.is_local = True
+                        track.local_path = path
+                    elif not track.local_path:
                         logger.warning(
-                            f"Track '{track.title}' was downloaded but path was not resolved by index."
+                            f"Track '{track.title}' by '{track.artist}' was downloaded but path was not resolved by index."
                         )
 
             # Free the index
@@ -1070,18 +1221,26 @@ class PlaylistImporter:
         if cover_filename:
             lines.append(f"#EXTIMG:{cover_filename}")
 
+        added = 0
+        skipped = 0
         for track in playlist.tracks:
             if not track.is_local or not track.local_path:
+                skipped += 1
+                logger.debug(
+                    f"M3U8 skip: '{track.title}' by '{track.artist}' "
+                    f"(is_local={track.is_local}, local_path='{track.local_path}')"
+                )
                 continue
 
             rel_path = _format_m3u8_relative_path(track.local_path, self.music_dir, playlist_dir)
             duration_s = track.duration_ms // 1000 if track.duration_ms else -1
             lines.append(f"#EXTINF:{duration_s},{track.artist} - {track.title}")
             lines.append(rel_path)
+            added += 1
 
         m3u_content = "\n".join(lines) + "\n"
         m3u_path.write_text(m3u_content, encoding="utf-8")
-        logger.info(f"Generated playlist file: {m3u_path} ({len(lines) - 2} entries)")
+        logger.info(f"Generated playlist file: {m3u_path} ({added} tracks added, {skipped} skipped)")
 
     # ── Cover Art Download ───────────────────────────────────────────────────
     async def _download_cover_art(self, playlist: PlaylistInfo) -> tuple[bytes | None, str | None]:

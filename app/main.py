@@ -362,7 +362,22 @@ async def import_status_sse(import_id: str, request: Request) -> EventSourceResp
 
 
 # ── Settings Routes ──────────────────────────────────────────────────────────
-_SETTINGS_FILE = Path(os.environ.get("STREAMRIP_CONFIG_PATH", "/config/config.toml")).parent / "musicrequest_settings.json"
+def _get_settings_file() -> Path:
+    """Return the best writable path for persisting settings."""
+    primary = Path(os.environ.get("STREAMRIP_CONFIG_PATH", "/config/config.toml")).parent / "musicrequest_settings.json"
+    try:
+        primary.parent.mkdir(parents=True, exist_ok=True)
+        # Test writability
+        if primary.exists():
+            with open(primary, "a"):
+                pass
+        else:
+            primary.touch()
+        return primary
+    except Exception:
+        pass
+    # Fallback to local app or temp directory
+    return Path("/tmp/musicrequest_settings.json")
 
 
 def _load_settings() -> dict[str, Any]:
@@ -372,12 +387,17 @@ def _load_settings() -> dict[str, Any]:
         "jellyfin_api_key": JELLYFIN_API_KEY,
         "default_quality": DEFAULT_QUALITY,
     }
-    if _SETTINGS_FILE.exists():
-        try:
-            saved = json.loads(_SETTINGS_FILE.read_text())
-            settings.update(saved)
-        except Exception:
-            pass
+    for candidate in [
+        Path(os.environ.get("STREAMRIP_CONFIG_PATH", "/config/config.toml")).parent / "musicrequest_settings.json",
+        Path("/tmp/musicrequest_settings.json"),
+    ]:
+        if candidate.exists():
+            try:
+                saved = json.loads(candidate.read_text())
+                settings.update(saved)
+                break
+            except Exception:
+                pass
     return settings
 
 
@@ -397,16 +417,28 @@ async def get_settings() -> dict[str, Any]:
 @app.post("/api/settings", dependencies=[Depends(require_auth)])
 async def save_settings(body: SettingsRequest) -> dict[str, Any]:
     """Persist settings and hot-reload the playlist importer."""
+    current = _load_settings()
     settings = {
         "jellyfin_url": body.jellyfin_url.rstrip("/"),
-        "jellyfin_api_key": body.jellyfin_api_key,
+        # Preserve existing API key if a new one was not supplied
+        "jellyfin_api_key": body.jellyfin_api_key if body.jellyfin_api_key else current.get("jellyfin_api_key", ""),
         "default_quality": body.default_quality,
     }
-    try:
-        _SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save settings: {e}")
+    saved_successfully = False
+    for target in [
+        Path(os.environ.get("STREAMRIP_CONFIG_PATH", "/config/config.toml")).parent / "musicrequest_settings.json",
+        Path("/tmp/musicrequest_settings.json"),
+    ]:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(settings, indent=2))
+            saved_successfully = True
+            break
+        except Exception as e:
+            logger.warning("Could not write settings to %s: %s", target, e)
+
+    if not saved_successfully:
+        raise HTTPException(status_code=500, detail="Could not write settings file (permission denied).")
 
     # Hot-reload the live instance
     if playlist_importer:
