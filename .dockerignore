@@ -22,4 +22,9 @@ music/
 config/
 *.log
 scratch/
-
+test_music/
+test_*/
+*.flac
+*.mp3
+*.m4a
+*.wav

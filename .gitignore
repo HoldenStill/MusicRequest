@@ -1,10 +1,11 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
+
+# C extensions / build
 .Python
 build/
 develop-eggs/
@@ -22,16 +23,23 @@ wheels/
 .installed.cfg
 *.egg
 
-# Distribution / packaging
-.Python
+# Distribution / packaging / virtualenvs
 env/
 venv/
+.venv/
 virtualenv/
 ENV/
 env.bak/
 venv.bak/
 
-# IDE
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDE & editors
 .vscode/
 .idea/
 .project
@@ -54,16 +62,36 @@ Thumbs.db
 *.sql
 *.sqlite
 
-# Environment variables
+# Environment variables & runtime config
 .env
 .env.local
 .env.*.local
+config.toml
+musicrequest_settings.json
 
-# Local media & configs
+# Audio and playlist files
+*.flac
+*.mp3
+*.m4a
+*.aac
+*.alac
+*.ogg
+*.opus
+*.wav
+*.wma
+*.aiff
+*.ape
+*.m3u
+*.m3u8
+
+# Media download directories & test media
 music/
+Playlists/
+downloads/
 config/
+test_music/
+test_*/
 scratch/
-*.log
 
 # Docker
 *.docker
