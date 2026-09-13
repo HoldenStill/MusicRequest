@@ -18,7 +18,7 @@ docker run -d \
   -p 8080:8080 \
   -v /path/to/your/music:/music \
   -v /path/to/your/config:/config \
-  -e APP_PASSCODE=1099 \
+  -e APP_PASSCODE=1234 \
   musicrequest
 ```
 
