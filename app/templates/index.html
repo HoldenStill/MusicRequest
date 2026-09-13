@@ -7,22 +7,31 @@
     <meta name="description" content="Server-Side Music Downloader">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/style.css?v=3">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="alternate icon" type="image/png" href="/static/favicon-32.png">
+    <link rel="shortcut icon" href="/static/favicon.ico">
 </head>
 <body>
-    <header class="header glass">
+    <header class="header">
         <div class="header-content">
             <div class="brand">
-                <h1 class="gradient-text">MusicRequest</h1>
+                <h1>MusicRequest</h1>
                 <span class="subtitle">Server-Side Music Downloader</span>
             </div>
+            <div id="mode-toggle" class="mode-toggle">
+                <button class="mode-btn active" data-mode="music">Music</button>
+                <button class="mode-btn" data-mode="youtube">YouTube</button>
+            </div>
             <div class="header-actions">
-                <button id="import-playlist-btn" class="btn-import">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="7 10 12 15 17 10"></polyline>
-                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                <button id="playlist-btn" class="btn-icon" title="Import Playlist" aria-label="Import Playlist">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="8" y1="6" x2="21" y2="6"></line>
+                        <line x1="8" y1="12" x2="21" y2="12"></line>
+                        <line x1="8" y1="18" x2="21" y2="18"></line>
+                        <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                        <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                        <line x1="3" y1="18" x2="3.01" y2="18"></line>
                     </svg>
-                    Import Playlist
                 </button>
                 <button id="settings-btn" class="btn-icon" title="Settings" aria-label="Settings">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -43,7 +52,7 @@
 
     <main class="container">
         <div class="search-section">
-            <form id="search-form" class="search-container glass">
+            <form id="search-form" class="search-container">
                 <input type="text" id="search-input" placeholder="Search music on Qobuz..." autocomplete="off">
                 <button type="submit" id="search-btn" class="btn-search">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -77,7 +86,7 @@
     </main>
 
     <!-- Queue Widget -->
-    <div id="queue-widget" class="queue-widget glass collapsed">
+    <div id="queue-widget" class="queue-widget collapsed">
         <div class="queue-header" id="queue-toggle">
             <div class="queue-title">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -134,6 +143,7 @@
         const filterPills     = document.querySelectorAll('.filter-pill');
 
         // ── State ───────────────────────────────────────────────────────────
+        let currentMode     = 'music'; // 'music' or 'youtube'
         let currentQueue    = { active: null, queued: [], completed: [] };
         let activeFilter    = 'album';
         let lastQuery       = '';
@@ -146,6 +156,29 @@
             return `${m}:${sec}`;
         };
         const getQuality = () => parseInt(globalQuality.value, 10);
+
+        // ── Mode Toggle ─────────────────────────────────────────────────────
+        const modeBtns = document.querySelectorAll('.mode-btn');
+        const qualityBar = document.querySelector('.quality-bar');
+        modeBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                modeBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentMode = btn.dataset.mode;
+                document.body.dataset.theme = currentMode;
+                if (currentMode === 'youtube') {
+                    searchInput.placeholder = 'Search YouTube or paste URL...';
+                    if (qualityBar) qualityBar.style.display = 'none';
+                    filterPills.forEach(p => p.style.display = 'none');
+                } else {
+                    searchInput.placeholder = 'Search music on Qobuz...';
+                    if (qualityBar) qualityBar.style.display = 'flex';
+                    filterPills.forEach(p => p.style.display = 'block');
+                }
+                if (lastQuery) performSearch(lastQuery);
+                setupSSE();
+            });
+        });
 
         // ── Logout ──────────────────────────────────────────────────────────
         logoutBtn.addEventListener('click', async () => {
@@ -176,7 +209,11 @@
             noResults.style.display = 'none';
 
             try {
-                const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&type=${activeFilter}`);
+                const endpoint = currentMode === 'youtube' 
+                    ? `/api/youtube/search?q=${encodeURIComponent(query)}` 
+                    : `/api/search?q=${encodeURIComponent(query)}&type=${activeFilter}`;
+                
+                const res = await fetch(endpoint);
                 if (!res.ok) {
                     let errMsg = 'Search failed (HTTP ' + res.status + ')';
                     try { const d = await res.json(); if (d.detail) errMsg = d.detail; } catch(e){}
@@ -187,7 +224,12 @@
             } catch (err) {
                 console.error(err);
                 resultsContainer.innerHTML = '';
-                noResults.innerHTML = `<p>${esc(err.message)}</p>`;
+                const isMusic = currentMode === 'music';
+                const is5xx = err.message && (err.message.includes('500') || err.message.includes('502'));
+                const hint = (isMusic && is5xx)
+                    ? '<p style="font-size:0.85rem;color:var(--text-muted);margin-top:0.6rem;">Qobuz service error. Verify your Qobuz credentials in streamrip config, or toggle to YouTube mode.</p>'
+                    : '';
+                noResults.innerHTML = `<p style="color:var(--error);font-weight:500;">${esc(err.message)}</p>${hint}`;
                 noResults.style.display = 'block';
             }
         };
@@ -248,7 +290,7 @@
                 <img src="${track.cover_art_url || ''}" alt="" class="track-card-img" loading="lazy" onerror="this.style.display='none'">
                 <div class="track-card-info">
                     <div class="track-card-title" title="${esc(track.title)}">${esc(track.title)}</div>
-                    <div class="track-card-meta">${esc(track.artist)} · ${esc(track.album_title)}</div>
+                    <div class="track-card-meta">${esc(track.artist)}${track.album_title ? ' · ' + esc(track.album_title) : ''}</div>
                 </div>
                 <span class="track-card-duration">${fmtDuration(track.duration)}</span>
                 <button class="btn btn-download">↓</button>
@@ -289,10 +331,11 @@
         async function downloadTrack(track, btnEl, quality = null) {
             btnEl.className = 'btn btn-queued'; btnEl.textContent = '...'; btnEl.disabled = true;
             try {
-                const res = await fetch('/api/download', {
+                const endpoint = currentMode === 'youtube' ? '/api/youtube/download' : '/api/download';
+                const res = await fetch(endpoint, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        album_id: track.album_id || '', title: track.title, artist: track.artist,
+                        album_id: currentMode === 'youtube' ? track.id : (track.album_id || ''), title: track.title, artist: track.artist,
                         download_type: 'track', track_id: track.track_id, quality: quality || getQuality(),
                         cover_art_url: track.cover_art_url || ''
                     })
@@ -601,8 +644,11 @@
         }
 
         // ── SSE ─────────────────────────────────────────────────────────────
-        function connectSSE() {
-            const evtSource = new EventSource('/api/queue');
+        let evtSource = null;
+        function setupSSE() {
+            if (evtSource) { evtSource.close(); evtSource = null; }
+            const endpoint = currentMode === 'youtube' ? '/api/youtube/queue' : '/api/queue';
+            evtSource = new EventSource(endpoint);
             evtSource.onmessage = (event) => {
                 try { currentQueue = JSON.parse(event.data); updateQueueWidget(); }
                 catch (e) { console.error("Error parsing SSE", e); }
@@ -625,28 +671,39 @@
                     }
                 }
             } catch (e) { console.error("Failed to initialize state", e); }
-            connectSSE();
+            setupSSE();
         }
 
         document.addEventListener('DOMContentLoaded', init);
 
         // ── Playlist Import ─────────────────────────────────────────────────
-        const importBtn = document.getElementById('import-playlist-btn');
         let playlistAnalysisCache = null;
         let playlistUrlCache = '';
         let playlistQualityCache = 3;
-
-        importBtn.addEventListener('click', () => openPlaylistInputModal());
+        const playlistBtn = document.getElementById('playlist-btn');
+        if (playlistBtn) {
+            playlistBtn.addEventListener('click', openPlaylistInputModal);
+        }
 
         function openPlaylistInputModal() {
+            const isYoutube = currentMode === 'youtube';
+            const title = isYoutube ? 'Import YouTube Playlist' : 'Import Music Playlist';
+            const subtitle = isYoutube 
+                ? 'Enter a public YouTube playlist or album URL to queue audio downloads.' 
+                : 'Paste a public Spotify or Qobuz playlist URL below to analyze and import tracks.';
+            const placeholder = isYoutube 
+                ? 'https://www.youtube.com/playlist?list=...' 
+                : 'https://open.spotify.com/playlist/...';
+            const btnText = isYoutube ? 'Import Playlist' : 'Analyze Playlist';
+            
             modalContent.innerHTML = `
                 <div class="playlist-input-section">
                     <button class="modal-close" id="modal-close-btn">✕</button>
-                    <h2 class="gradient-text">Import Playlist</h2>
-                    <p>Paste a public Spotify or Qobuz playlist URL below to analyze and import tracks.</p>
-                    <input type="text" class="playlist-url-input" id="playlist-url-input"
-                           placeholder="https://open.spotify.com/playlist/..." autocomplete="off">
-                    <div class="quality-bar" style="justify-content:flex-start">
+                    <h2>${title}</h2>
+                    <p style="color:var(--text-secondary);font-size:0.85rem;">${subtitle}</p>
+                    <input type="text" id="modal-playlist-url" class="playlist-url-input" placeholder="${placeholder}" autocomplete="off">
+                    ${!isYoutube ? `
+                    <div class="quality-bar" style="justify-content:flex-start; margin-top: 0.25rem;">
                         <label>Quality:</label>
                         <select id="import-quality" class="quality-select">
                             <option value="1" ${playlistQualityCache === 1 ? 'selected' : ''}>MP3 320</option>
@@ -655,37 +712,64 @@
                             <option value="4" ${playlistQualityCache === 4 ? 'selected' : ''}>Hi-Res+ 24/192</option>
                         </select>
                     </div>
-                    <button class="btn-analyze" id="btn-analyze-playlist">Analyze Playlist</button>
+                    ` : ''}
+                    <button type="button" id="modal-analyze-btn" class="btn-analyze" style="margin-top: 0.5rem;">${btnText}</button>
                 </div>
             `;
             modalOverlay.classList.add('active');
+
+            const analyzeBtn = document.getElementById('modal-analyze-btn');
+            const urlInput = document.getElementById('modal-playlist-url');
+            
             document.getElementById('modal-close-btn').addEventListener('click', closeModal);
 
-            const urlInput = document.getElementById('playlist-url-input');
-            const analyzeBtn = document.getElementById('btn-analyze-playlist');
-
-            const captureQuality = () => {
-                const qualityEl = document.getElementById('import-quality');
-                if (qualityEl) {
-                    playlistQualityCache = parseInt(qualityEl.value, 10);
+            const handleImport = () => {
+                const url = urlInput.value.trim();
+                if (!url) return;
+                if (currentMode === 'youtube') {
+                    importYoutubePlaylist(url, analyzeBtn);
+                } else {
+                    const qualityEl = document.getElementById('import-quality');
+                    if (qualityEl) {
+                        playlistQualityCache = parseInt(qualityEl.value, 10);
+                    }
+                    analyzePlaylist(url);
                 }
             };
 
-            analyzeBtn.addEventListener('click', () => {
-                const url = urlInput.value.trim();
-                if (!url) return;
-                captureQuality();
-                analyzePlaylist(url);
-            });
-
+            analyzeBtn.addEventListener('click', handleImport);
             urlInput.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') {
                     e.preventDefault();
-                    const url = urlInput.value.trim();
-                    captureQuality();
-                    if (url) analyzePlaylist(url);
+                    handleImport();
                 }
             });
+            urlInput.focus();
+        }
+
+        async function importYoutubePlaylist(url, btnEl) {
+            const originalText = btnEl.textContent;
+            btnEl.textContent = 'Queuing...';
+            btnEl.disabled = true;
+            try {
+                const res = await fetch('/api/youtube/playlist', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url }),
+                });
+                if (!res.ok) throw new Error('Failed to queue YouTube playlist');
+                btnEl.textContent = 'Queued ✓';
+                setTimeout(() => {
+                    closeModal();
+                }, 1500);
+            } catch (err) {
+                console.error(err);
+                btnEl.textContent = 'Failed';
+                setTimeout(() => {
+                    btnEl.textContent = originalText;
+                    btnEl.disabled = false;
+                }, 3000);
+            }
         }
 
         async function analyzePlaylist(url) {

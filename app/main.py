@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -20,6 +20,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.streamrip_handler import StreamripHandler
 from app.playlist_handler import PlaylistImporter
+from app.youtube_handler import YoutubeHandler
 
 logger = logging.getLogger("musicrequest")
 
@@ -65,16 +66,19 @@ _TEMPLATE_DIR = _BASE_DIR / "templates"
 
 handler: StreamripHandler | None = None
 playlist_importer: PlaylistImporter | None = None
+yt_handler: YoutubeHandler | None = None
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Initialize the StreamripHandler, PlaylistImporter, and start the download worker."""
-    global handler, playlist_importer
+    global handler, playlist_importer, yt_handler
     logger.info("Starting MusicRequest (config=%s, music=%s)", STREAMRIP_CONFIG_PATH, MUSIC_DIR)
     handler = StreamripHandler(config_path=STREAMRIP_CONFIG_PATH, music_dir=MUSIC_DIR)
     await handler.start_worker()
+    yt_handler = YoutubeHandler(music_dir=MUSIC_DIR)
+    await yt_handler.start_worker()
     playlist_importer = PlaylistImporter(
         music_dir=MUSIC_DIR,
         config_path=STREAMRIP_CONFIG_PATH,
@@ -85,6 +89,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     if handler:
         await handler.stop_worker()
+    if yt_handler:
+        await yt_handler.stop_worker()
     logger.info("MusicRequest shut down.")
 
 
@@ -189,6 +195,12 @@ async def root(request: Request) -> Response:
     return templates.TemplateResponse(template, {"request": request})
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> FileResponse:
+    """Serve the favicon.ico directly."""
+    return FileResponse(str(_STATIC_DIR / "favicon.ico"))
+
+
 @app.get("/api/search", dependencies=[Depends(require_auth)])
 async def search(q: str, type: str = "album", limit: int = SEARCH_LIMIT) -> list[dict[str, Any]]:
     """Search Qobuz for albums, tracks, or artists matching the query string."""
@@ -196,7 +208,11 @@ async def search(q: str, type: str = "album", limit: int = SEARCH_LIMIT) -> list
         raise HTTPException(status_code=503, detail="Handler not initialized")
     if type not in ("album", "track", "artist"):
         raise HTTPException(status_code=400, detail="Invalid search type. Use 'album', 'track', or 'artist'.")
-    return await handler.search(q, limit, media_type=type)
+    try:
+        return await handler.search(q, limit, media_type=type)
+    except Exception as e:
+        logger.warning("Qobuz search failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"Qobuz search error: {str(e)[:120]}")
 
 
 @app.get("/api/album/{album_id}/tracks", dependencies=[Depends(require_auth)])
@@ -273,9 +289,72 @@ async def queue_sse(request: Request) -> EventSourceResponse:
     return EventSourceResponse(event_generator())
 
 
+# ── YouTube Routes ───────────────────────────────────────────────────────────
+class YoutubePlaylistRequest(BaseModel):
+    url: str
+
+@app.get("/api/youtube/search", dependencies=[Depends(require_auth)])
+async def yt_search(q: str, limit: int = SEARCH_LIMIT) -> list[dict[str, Any]]:
+    """Search YouTube."""
+    if not yt_handler:
+        raise HTTPException(status_code=503, detail="Handler not initialized")
+    return await yt_handler.search(q, limit)
+
+@app.post("/api/youtube/download", dependencies=[Depends(require_auth)])
+async def yt_download(body: DownloadRequest) -> dict[str, Any]:
+    """Enqueue a YouTube download."""
+    if not yt_handler:
+        raise HTTPException(status_code=503, detail="Handler not initialized")
+    job = await yt_handler.enqueue_download(
+        url=body.album_id, # url passed as album_id
+        title=body.title,
+        artist=body.artist,
+        cover_art_url=body.cover_art_url,
+        quality=body.quality,
+    )
+    return {"job_id": job.job_id, "status": "queued"}
+
+@app.post("/api/youtube/playlist", dependencies=[Depends(require_auth)])
+async def yt_playlist(body: YoutubePlaylistRequest) -> dict[str, Any]:
+    """Enqueue a YouTube playlist download."""
+    if not yt_handler:
+        raise HTTPException(status_code=503, detail="Handler not initialized")
+    try:
+        job = await yt_handler.enqueue_playlist(body.url)
+        return {"job_id": job.job_id, "status": "queued"}
+    except Exception as e:
+        logger.exception("Youtube playlist import failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/youtube/queue", dependencies=[Depends(require_auth)])
+async def yt_queue_sse(request: Request) -> EventSourceResponse:
+    """SSE stream of real-time queue status updates for YouTube."""
+    if not yt_handler:
+        raise HTTPException(status_code=503, detail="Handler not initialized")
+
+    sub_queue = yt_handler.subscribe()
+
+    async def event_generator() -> AsyncGenerator[dict[str, Any], None]:
+        try:
+            yield {"data": json.dumps(yt_handler.get_queue_status())}
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(sub_queue.get(), timeout=15.0)
+                    yield {"data": json.dumps(data)}
+                except asyncio.TimeoutError:
+                    yield {"event": "ping", "data": ""}
+        finally:
+            yt_handler.unsubscribe(sub_queue)
+
+    return EventSourceResponse(event_generator())
+
+
 # ── Playlist Import Routes ───────────────────────────────────────────────────
 # Cache analyzed playlists briefly so the import step doesn't re-scrape
-_analyzed_playlists: dict[str, Any] = {}
+from cachetools import TTLCache
+_analyzed_playlists: TTLCache = TTLCache(maxsize=50, ttl=600)
 
 
 @app.post("/api/playlist/analyze", dependencies=[Depends(require_auth)])

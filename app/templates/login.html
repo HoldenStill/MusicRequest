@@ -5,149 +5,139 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MusicRequest - Login</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="alternate icon" type="image/png" href="/static/favicon-32.png">
+    <link rel="shortcut icon" href="/static/favicon.ico">
     <style>
-        :root {
-            --bg-dark: #09090b;
-            --gradient-bg: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-            --glass-bg: rgba(255, 255, 255, 0.03);
-            --glass-border: rgba(255, 255, 255, 0.08);
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --accent-start: #8b5cf6;
-            --accent-end: #06b6d4;
-            --error: #ef4444;
-        }
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
         body {
-            font-family: 'Inter', sans-serif;
-            background: var(--gradient-bg);
-            background-size: 200% 200%;
-            animation: gradientMove 15s ease infinite;
-            color: var(--text-main);
-            min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
+            min-height: 100vh;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
             overflow: hidden;
-        }
-
-        @keyframes gradientMove {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
+            margin: 0;
+            padding: 1.5rem;
         }
 
         .login-card {
-            background: var(--glass-bg);
-            backdrop-filter: blur(24px);
-            -webkit-backdrop-filter: blur(24px);
-            border: 1px solid var(--glass-border);
-            border-radius: 24px;
-            padding: 3rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 2.5rem 2rem;
             width: 100%;
-            max-width: 400px;
+            max-width: 380px;
             text-align: center;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            transition: transform 0.3s ease;
+            box-shadow: var(--shadow-hover);
+            animation: cardFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
-        .app-title {
-            font-size: 2rem;
-            font-weight: 700;
-            margin-bottom: 0.5rem;
-            background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
+        @keyframes cardFadeIn {
+            from { opacity: 0; transform: translateY(12px) scale(0.98); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
         }
 
         .icon-container {
-            margin: 0 auto 2rem;
-            width: 64px;
-            height: 64px;
-            border-radius: 50%;
-            background: rgba(255,255,255,0.05);
+            margin: 0 auto 1.5rem;
+            width: 52px;
+            height: 52px;
+            border-radius: var(--radius-md);
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
             display: flex;
             align-items: center;
             justify-content: center;
-            border: 1px solid var(--glass-border);
+            color: var(--text-primary);
+            transition: var(--transition);
         }
 
         .icon-container svg {
-            width: 32px;
-            height: 32px;
-            stroke: url(#accent-grad);
+            width: 24px;
+            height: 24px;
+            stroke: currentColor;
+        }
+
+        .app-title {
+            font-size: 1.6rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 0.25rem;
+            letter-spacing: -0.02em;
+        }
+
+        .app-subtitle {
+            color: var(--text-muted);
+            margin-bottom: 2rem;
+            font-size: 0.85rem;
+            font-family: 'JetBrains Mono', monospace;
         }
 
         .input-group {
-            margin-bottom: 2rem;
+            margin-bottom: 1.25rem;
             position: relative;
         }
 
         .passcode-input {
             width: 100%;
-            background: rgba(0, 0, 0, 0.2);
-            border: 1px solid var(--glass-border);
-            border-radius: 12px;
-            padding: 1rem;
-            font-size: 1.5rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 0.85rem 1rem;
+            font-size: 1.4rem;
             font-family: 'JetBrains Mono', monospace;
-            color: var(--text-main);
+            color: var(--text-primary);
             text-align: center;
-            letter-spacing: 0.5rem;
+            letter-spacing: 0.45rem;
             outline: none;
-            transition: all 0.3s ease;
+            transition: var(--transition);
         }
 
         .passcode-input:focus {
-            border-color: var(--accent-start);
-            box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
+            border-color: var(--text-primary);
+            box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.08);
         }
 
         .passcode-input::placeholder {
             color: var(--text-muted);
             letter-spacing: normal;
-            font-size: 1rem;
+            font-size: 0.9rem;
             font-family: 'Inter', sans-serif;
-            transform: translateY(-4px);
+            transform: translateY(-2px);
             display: inline-block;
         }
 
         .btn-submit {
             width: 100%;
-            padding: 1rem;
+            padding: 0.85rem;
             border: none;
-            border-radius: 12px;
-            background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
-            color: white;
-            font-size: 1.1rem;
+            border-radius: var(--radius-md);
+            background: var(--accent);
+            color: var(--bg-primary);
+            font-size: 0.95rem;
             font-weight: 600;
             cursor: pointer;
-            transition: opacity 0.3s, transform 0.1s;
+            transition: var(--transition);
             font-family: 'Inter', sans-serif;
         }
 
         .btn-submit:hover {
-            opacity: 0.9;
+            background: var(--accent-hover);
         }
 
         .btn-submit:active {
-            transform: scale(0.98);
+            transform: scale(0.99);
         }
 
         .error-message {
             color: var(--error);
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             margin-top: 1rem;
             min-height: 20px;
             opacity: 0;
-            transition: opacity 0.3s;
+            transition: opacity 0.2s ease;
+            font-family: 'Inter', sans-serif;
         }
 
         .shake {
@@ -164,15 +154,6 @@
 </head>
 <body>
 
-    <svg width="0" height="0">
-        <defs>
-            <linearGradient id="accent-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stop-color="#8b5cf6" />
-                <stop offset="100%" stop-color="#06b6d4" />
-            </linearGradient>
-        </defs>
-    </svg>
-
     <div class="login-card" id="login-card">
         <div class="icon-container">
             <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -181,7 +162,7 @@
             </svg>
         </div>
         <h1 class="app-title">MusicRequest</h1>
-        <p style="color: var(--text-muted); margin-bottom: 2rem; font-size: 0.9rem;">Authenticate to access</p>
+        <p class="app-subtitle">Authenticate to access</p>
         
         <form id="login-form">
             <div class="input-group">
