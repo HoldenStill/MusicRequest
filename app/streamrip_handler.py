@@ -210,6 +210,10 @@ class StreamripHandler:
         return f"{size_bytes:.1f} {size_names[i]}"
 
     # ── Search ───────────────────────────────────────────────────────────────
+    from cachetools import TTLCache
+    from asyncache import cached
+
+    @cached(cache=TTLCache(maxsize=100, ttl=300))
     async def search(self, query: str, limit: int = 10, media_type: str = "album") -> list[dict[str, Any]]:
         """Search Qobuz for albums, tracks, or artists using Streamrip's internal client."""
         client = None

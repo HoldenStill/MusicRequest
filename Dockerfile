@@ -45,11 +45,14 @@ RUN set -eux; \
 FROM python:3.12-alpine
 
 # Install minimal runtime libraries, native ffmpeg + ffprobe, and setup non-root user (UID/GID 568)
-RUN apk add --no-cache ffmpeg libjpeg-turbo libffi libgcc && \
-    addgroup -g 568 -S apps && \
-    adduser -u 568 -S apps -G apps -s /bin/sh && \
-    mkdir -p /music /config /app && \
-    chown -R 568:568 /music /config /app
+RUN set -eux; \
+    apk add --no-cache ffmpeg libjpeg-turbo libffi libgcc; \
+    addgroup -g 568 -S apps; \
+    adduser -u 568 -S apps -G apps -s /bin/sh; \
+    mkdir -p /music /config /app; \
+    chown -R 568:568 /music /config /app; \
+    rm -rf /var/cache/apk/*; \
+    find /etc /usr /lib /var /music /config /app -exec touch -d "2025-01-01T00:00:00Z" {} + 2>/dev/null || true
 
 # Copy ultra-lean Python environment (~16MB compressed, deterministic hash cached permanently)
 COPY --from=builder /install /usr/local

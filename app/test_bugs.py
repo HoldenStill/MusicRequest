@@ -95,19 +95,22 @@ class TestArtistDetailsNullHandling(unittest.TestCase):
         cm1 = make_mock_response(200, {
             "id": 888,
             "name": "List Artist",
-            "albums": [
-                {"id": "alb1", "title": "Album One", "released_at": "2020-01-01", "image": {"large": "http://img/1_230.jpg"}}
-            ],
             "biography": {"content": "Great artist bio"}
         })
 
         cm2 = make_mock_response(200, {
+            "albums": [
+                {"id": "alb1", "title": "Album One", "released_at": "2020-01-01", "image": {"large": "http://img/1_230.jpg"}}
+            ]
+        })
+
+        cm3 = make_mock_response(200, {
             "tracks_top": [
                 {"id": "trk1", "title": "Track One", "duration": 180, "album": {"id": "alb1", "title": "Album One"}}
             ]
         })
 
-        mock_client.session.get = MagicMock(side_effect=[cm1, cm2])
+        mock_client.session.get = MagicMock(side_effect=[cm1, cm2, cm3])
         mock_client.session.close = AsyncMock()
         mock_create_client.return_value = (mock_client, MagicMock())
 
