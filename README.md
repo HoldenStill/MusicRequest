@@ -1,6 +1,6 @@
 # MusicRequest
 
-A self-hosted web UI for searching and downloading music albums via [streamrip](https://github.com/nathom/streamrip). Audio files are saved directly to the server's storage — nothing is ever sent to the browser.
+A sleek, self-hosted web application that acts as a front-end for [streamrip](https://github.com/nathom/streamrip), enabling you to easily search, queue, and download high-resolution music albums directly to your server. Designed with a modern, responsive glassmorphism interface, MusicRequest makes it effortless to build your digital library—while ensuring your audio files are saved securely on your host machine without passing through the browser.
 
 ![Dark-themed album search interface with glassmorphism design]
 
@@ -18,7 +18,7 @@ docker run -d \
   -p 8080:8080 \
   -v /path/to/your/music:/music \
   -v /path/to/your/config:/config \
-  -e APP_PASSCODE=1234 \
+  -e APP_PASSCODE=your_secure_passcode \
   musicrequest
 ```
 
@@ -38,44 +38,47 @@ The easiest way is to run streamrip once to generate the default config, then ed
 
 ```bash
 # Run a temporary container to generate the default config
-docker run --rm -v /mnt/pool/apps/musicrequest/config:/config musicrequest \
+docker run --rm -v /path/to/your/config:/config musicrequest \
   bash -c "rip --config-path /config/config.toml config list"
 ```
 
-This creates `/mnt/pool/apps/musicrequest/config/config.toml` with all default values.
+This creates `/path/to/your/config/config.toml` with all default values.
 
 #### 1b. Configure Qobuz credentials
+
+Because email/password authentication is often unreliable with Qobuz, it is recommended to use authentication tokens extracted directly from your browser.
 
 Edit the `config.toml` file:
 
 ```bash
-nano /mnt/pool/apps/musicrequest/config/config.toml
+nano /path/to/your/config/config.toml
 ```
 
-Update the `[qobuz]` section:
+Update the `[qobuz]` section to enable token authentication:
 
 ```toml
 [qobuz]
 quality = 3                          # 1: 320kbps MP3, 2: 16/44.1, 3: 24/≤96, 4: 24/≥96
 download_booklets = true
 
-use_auth_token = false
-email_or_userid = "your-qobuz-email@example.com"
-# MD5 hash of your Qobuz password:
-password_or_token = "your_md5_hashed_password"
+use_auth_token = true
+email_or_userid = "your_user_id"     # Found in Qobuz API requests
+password_or_token = "your_x_user_auth_token"
 
 # Leave these empty — streamrip will auto-populate on first use
 app_id = ""
 secrets = []
 ```
 
-**To get the MD5 hash of your password:**
-
-```bash
-echo -n "YourActualPassword" | md5sum
-```
-
-Copy the hash (without the trailing ` -`) into `password_or_token`.
+**To extract your authentication token and User ID:**
+1. Log into the Qobuz web player (`play.qobuz.com`) in your web browser.
+2. Open your browser's Developer Tools (usually `F12` or right-click -> `Inspect`).
+3. Go to the **Network** tab and filter by `api.qobuz.com`.
+4. Refresh the page or start playing a song.
+5. Click on one of the API requests in the list (e.g., `get` or `getUser`).
+6. In the **Request Headers** section, find the `x-user-auth-token` header and copy its value. Paste this into `password_or_token`.
+7. To find your `user_id`, look at the **Payload** (or Query String Parameters) for that same API request. You will see a `user_id` parameter. Copy its value and paste it into `email_or_userid`.
+   *(Note: Both values can often also be found in the **Application** / **Storage** tab under **Local Storage** for `https://play.qobuz.com`)*
 
 #### 1c. Set the download folder
 
@@ -92,7 +95,7 @@ Run the container interactively to trigger the initial Qobuz login (this populat
 
 ```bash
 docker run --rm -it \
-  -v /mnt/pool/apps/musicrequest/config:/config \
+  -v /path/to/your/config:/config \
   musicrequest \
   rip --config-path /config/config.toml search qobuz album "test"
 ```
@@ -109,15 +112,15 @@ Create two datasets on your TrueNAS pool:
 
 | Dataset | Purpose | Example Path |
 |---------|---------|-------------|
-| Config | `config.toml` storage | `/mnt/pool/apps/musicrequest/config` |
-| Music | Downloaded music library | `/mnt/pool/media/music` |
+| Config | `config.toml` storage | `/mnt/your_pool/apps/musicrequest/config` |
+| Music | Downloaded music library | `/mnt/your_pool/media/music` |
 
 Set permissions to UID/GID **568** (the TrueNAS `apps` user):
 
 ```bash
 # SSH into TrueNAS
-sudo chown -R 568:568 /mnt/pool/apps/musicrequest/config
-sudo chown -R 568:568 /mnt/pool/media/music
+sudo chown -R 568:568 /mnt/your_pool/apps/musicrequest/config
+sudo chown -R 568:568 /mnt/your_pool/media/music
 ```
 
 #### 2b. Deploy as Custom App
@@ -135,7 +138,7 @@ sudo chown -R 568:568 /mnt/pool/media/music
 
 | Variable | Value |
 |----------|-------|
-| `APP_PASSCODE` | Your chosen passcode (default: `1099`) |
+| `APP_PASSCODE` | Your chosen passcode |
 | `STREAMRIP_CONFIG_PATH` | `/config/config.toml` |
 | `MUSIC_DIR` | `/music` |
 | `SEARCH_LIMIT` | `10` |
@@ -150,8 +153,8 @@ sudo chown -R 568:568 /mnt/pool/media/music
 
 | Host Path | Mount Path | Description |
 |-----------|-----------|-------------|
-| `/mnt/pool/apps/musicrequest/config` | `/config` | Streamrip configuration |
-| `/mnt/pool/media/music` | `/music` | Music download destination |
+| `/mnt/your_pool/apps/musicrequest/config` | `/config` | Streamrip configuration |
+| `/mnt/your_pool/media/music` | `/music` | Music download destination |
 
 6. **Security Context:**
    - Run as User: `568`
@@ -221,7 +224,7 @@ chunked_transfer_encoding off;
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `APP_PASSCODE` | `1099` | Passcode required to access the web UI |
+| `APP_PASSCODE` | `your_secure_passcode` | Passcode required to access the web UI |
 | `STREAMRIP_CONFIG_PATH` | `/config/config.toml` | Path to streamrip configuration file |
 | `MUSIC_DIR` | `/music` | Server directory where music is downloaded |
 | `SEARCH_LIMIT` | `10` | Maximum number of search results returned |
