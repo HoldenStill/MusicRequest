@@ -5,7 +5,8 @@
 > [!NOTE]
 > **AI Disclaimer**: This application and codebase were created almost entirely by Google Gemini agents.
 
-A sleek, self-hosted web application that acts as a front-end for [streamrip](https://github.com/nathom/streamrip), enabling you to easily search, queue, and download high-resolution music albums directly to your server. Designed with a modern, responsive glassmorphism interface, MusicRequest makes it effortless to build your digital library—while ensuring your audio files are saved securely on your host machine without passing through the browser.
+A sleek, self-hosted web application that acts as a front-end for [streamrip](https://github.com/nathom/streamrip), enabling you to easily search, queue, and download high-resolution music albums directly to your server. 
+MusicRequest makes it effortless to build your digital library—while ensuring your audio files are saved securely on your host machine without passing through the browser.
 
 ![Dark-themed album search interface with glassmorphism design]
 
