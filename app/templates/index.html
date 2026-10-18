@@ -1045,8 +1045,42 @@
                     <p id="settings-jf-status" style="font-size:0.75rem;margin:0.6rem 0 0;min-height:1.2em"></p>
                 </div>
             </div>
-            <div style="padding:1rem 1.5rem;border-top:1px solid var(--border,rgba(255,255,255,0.08));display:flex;gap:0.75rem;justify-content:flex-end">
-                <button id="settings-save-btn" class="btn btn-download" style="min-width:100px">Save</button>
+            <div style="padding:1rem 1.5rem;border-top:1px solid var(--border,rgba(255,255,255,0.08));display:flex;gap:0.75rem;justify-content:space-between;flex-wrap:wrap-reverse">
+                <button id="admin-settings-btn" class="btn btn-secondary" style="min-width:100px;background:var(--surface-3);color:var(--text-muted);flex-grow:1">Advanced...</button>
+                <button id="settings-save-btn" class="btn btn-download" style="min-width:100px;flex-grow:2">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Auth Modal -->
+    <div id="admin-auth-overlay" class="modal-overlay">
+        <div class="modal-content" style="max-width:320px;padding:2rem">
+            <h2 style="margin:0 0 1rem;font-size:1.1rem;font-weight:600;text-align:center">Admin Verification</h2>
+            <p style="font-size:0.8rem;color:var(--text-muted);text-align:center;margin-bottom:1rem">Enter the admin passcode to access advanced configuration.</p>
+            <input type="password" id="admin-passcode-input" class="search-input" style="width:100%;margin-bottom:1rem;text-align:center" placeholder="Passcode">
+            <div style="display:flex;gap:0.75rem;justify-content:center">
+                <button id="admin-auth-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="admin-auth-submit" class="btn btn-download">Verify</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Settings Modal -->
+    <div id="admin-settings-overlay" class="modal-overlay">
+        <div class="modal-content" style="max-width:540px;padding:0;display:flex;flex-direction:column;max-height:80vh">
+            <div style="padding:1.5rem 1.5rem 1rem;border-bottom:1px solid var(--border)">
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                    <h2 style="margin:0;font-size:1.1rem;font-weight:600">Advanced Configuration</h2>
+                    <button id="admin-settings-close" class="modal-close" style="position:static;transform:none">✕</button>
+                </div>
+            </div>
+            
+            <div style="padding:1.5rem;overflow-y:auto;flex:1" id="admin-config-container">
+                <div class="modal-loading"><div class="spinner"></div></div>
+            </div>
+
+            <div style="padding:1rem 1.5rem;border-top:1px solid var(--border);display:flex;gap:0.75rem;justify-content:flex-end">
+                <button id="admin-settings-save" class="btn btn-download" style="min-width:100px">Apply Changes</button>
             </div>
         </div>
     </div>
@@ -1125,6 +1159,159 @@
                 saveBtn.textContent = 'Save';
             }
         });
+    })();
+
+    // Admin Settings logic
+    (function() {
+        const adminBtn = document.getElementById('admin-settings-btn');
+        const authOverlay = document.getElementById('admin-auth-overlay');
+        const configOverlay = document.getElementById('admin-settings-overlay');
+        
+        const passcodeIn = document.getElementById('admin-passcode-input');
+        const authSub = document.getElementById('admin-auth-submit');
+        const authCan = document.getElementById('admin-auth-cancel');
+        
+        const configContainer = document.getElementById('admin-config-container');
+        const saveConfigBtn = document.getElementById('admin-settings-save');
+        const closeConfigBtn = document.getElementById('admin-settings-close');
+        
+        let loadedConfig = {};
+
+        function esc(s) {
+            return (s || '').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        adminBtn.addEventListener('click', () => {
+            // Check if we already have a valid session by trying to get config
+            loadConfig().catch(() => {
+                // Needs auth
+                authOverlay.classList.add('active');
+                passcodeIn.value = '';
+                passcodeIn.focus();
+            });
+        });
+
+        authCan.addEventListener('click', () => { authOverlay.classList.remove('active'); });
+        authOverlay.addEventListener('click', e => { if(e.target===authOverlay) authOverlay.classList.remove('active'); });
+        closeConfigBtn.addEventListener('click', () => { configOverlay.classList.remove('active'); });
+        configOverlay.addEventListener('click', e => { if(e.target===configOverlay) configOverlay.classList.remove('active'); });
+        
+        passcodeIn.addEventListener('keydown', e => { if (e.key === 'Enter') authSub.click(); });
+
+        authSub.addEventListener('click', async () => {
+            const code = passcodeIn.value;
+            authSub.disabled = true;
+            try {
+                const res = await fetch('/api/admin/auth', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({passcode: code})
+                });
+                if (res.ok) {
+                    authOverlay.classList.remove('active');
+                    await loadConfig();
+                } else {
+                    alert('Invalid passcode');
+                }
+            } catch (e) {
+                alert('Auth error');
+            } finally {
+                authSub.disabled = false;
+            }
+        });
+
+        async function loadConfig() {
+            const res = await fetch('/api/admin/config');
+            if (!res.ok) throw new Error("Unauthorized");
+            loadedConfig = await res.json();
+            
+            // Build UI for loadedConfig
+            let html = '';
+            for (const [section, values] of Object.entries(loadedConfig)) {
+                if (typeof values !== 'object' || Array.isArray(values)) continue;
+                html += `<div style="margin-bottom:1.5rem">`;
+                html += `<h3 style="margin:0 0 0.75rem;font-size:1rem;color:var(--text-primary);border-bottom:1px solid var(--border);padding-bottom:0.25rem;text-transform:uppercase;font-weight:700">[${esc(section)}]</h3>`;
+                html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">`;
+                for (const [key, val] of Object.entries(values)) {
+                    // skip objects/arrays inside section
+                    if (typeof val === 'object' && val !== null) continue;
+                    
+                    const isBool = typeof val === 'boolean';
+                    const isNum = typeof val === 'number';
+                    
+                    html += `<div style="display:flex;flex-direction:column;gap:0.25rem">`;
+                    html += `<label style="font-size:0.75rem;color:var(--text-muted);font-family:monospace" title="${esc(key)}">${esc(key)}</label>`;
+                    
+                    if (isBool) {
+                        html += `
+                            <select data-section="${esc(section)}" data-key="${esc(key)}" data-type="boolean" class="search-input" style="padding:0.4rem;font-size:0.8rem">
+                                <option value="true" ${val ? 'selected' : ''}>true</option>
+                                <option value="false" ${!val ? 'selected' : ''}>false</option>
+                            </select>
+                        `;
+                    } else if (isNum) {
+                        html += `<input data-section="${esc(section)}" data-key="${esc(key)}" data-type="number" type="number" class="search-input" value="${esc(val)}" style="padding:0.4rem;font-size:0.8rem">`;
+                    } else {
+                        html += `<input data-section="${esc(section)}" data-key="${esc(key)}" data-type="string" type="text" class="search-input" value="${esc(val)}" style="padding:0.4rem;font-size:0.8rem">`;
+                    }
+                    html += `</div>`;
+                }
+                html += `</div></div>`;
+            }
+            
+            configContainer.innerHTML = html || '<p>No editable settings found.</p>';
+            configOverlay.classList.add('active');
+        }
+
+        saveConfigBtn.addEventListener('click', async () => {
+            // Gather values
+            const inputs = configContainer.querySelectorAll('input[data-section], select[data-section]');
+            const newConfig = {};
+            
+            inputs.forEach(input => {
+                const sec = input.getAttribute('data-section');
+                const key = input.getAttribute('data-key');
+                const type = input.getAttribute('data-type');
+                let val = input.value;
+                
+                if (type === 'boolean') val = (val === 'true');
+                else if (type === 'number') val = Number(val);
+                
+                if (!newConfig[sec]) newConfig[sec] = {};
+                newConfig[sec][key] = val;
+            });
+
+            saveConfigBtn.disabled = true;
+            saveConfigBtn.textContent = 'Saving...';
+            
+            try {
+                const res = await fetch('/api/admin/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ config: newConfig })
+                });
+                
+                if (res.ok) {
+                    const btnOriginal = saveConfigBtn.textContent;
+                    saveConfigBtn.textContent = 'Saved!';
+                    saveConfigBtn.style.background = 'var(--success, #4ade80)';
+                    saveConfigBtn.style.color = '#000';
+                    setTimeout(() => {
+                        saveConfigBtn.textContent = 'Apply Changes';
+                        saveConfigBtn.style.background = '';
+                        saveConfigBtn.style.color = '';
+                        configOverlay.classList.remove('active');
+                    }, 1500);
+                } else {
+                    alert('Save failed: ' + await res.text());
+                }
+            } catch (e) {
+                alert('Save error');
+            } finally {
+                saveConfigBtn.disabled = false;
+            }
+        });
+
     })();
     </script>
 </body>

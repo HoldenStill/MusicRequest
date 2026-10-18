@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 # ── Regex for URL detection ──────────────────────────────────────────────────
 SPOTIFY_PLAYLIST_RE = re.compile(
-    r"(?:https?://)?(?:open\.)?spotify\.com/(?:embed/)?playlist/([a-zA-Z0-9]+)"
+    r"(?:https?://)?(?:open\.)?spotify\.com/(?:(?:intl-[a-z]{2}(?:-[a-zA-Z0-9]+)?|user/[^/]+)/)?(?:embed/)?playlist/([a-zA-Z0-9]+)|spotify:playlist:([a-zA-Z0-9]+)",
+    re.IGNORECASE,
 )
 QOBUZ_PLAYLIST_RE = re.compile(
     r"(?:https?://)?(?:open|play|www)\.qobuz\.com/.*playlist/([a-zA-Z0-9-]+)"
@@ -330,7 +331,8 @@ class PlaylistImporter:
         url = url.strip()
         m = SPOTIFY_PLAYLIST_RE.search(url)
         if m:
-            return "spotify", m.group(1)
+            pid = m.group(1) or m.group(2)
+            return "spotify", pid
         m = QOBUZ_PLAYLIST_RE.search(url)
         if m:
             return "qobuz", m.group(1)
@@ -348,6 +350,7 @@ class PlaylistImporter:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/126.0.0.0 Safari/537.36"
             ),
+            "Accept-Language": "en-US,en;q=0.9",
         }
 
         async with aiohttp.ClientSession() as session:
@@ -360,68 +363,156 @@ class PlaylistImporter:
 
         # Extract __NEXT_DATA__ JSON from the embed page
         match = re.search(
-            r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-            html, re.DOTALL,
+            r'<script[^>]*id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+            html,
+            re.DOTALL,
         )
         if not match:
+            if "Page not found" in html:
+                raise RuntimeError(
+                    f"Spotify playlist '{playlist_id}' was not found. "
+                    "Please check that the link is correct and the playlist is set to Public."
+                )
             raise RuntimeError(
                 "Could not find __NEXT_DATA__ in Spotify embed page. "
                 "The playlist may be private or the page structure changed."
             )
 
-        data = json.loads(match.group(1))
+        try:
+            data = json.loads(match.group(1))
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to parse Spotify embed data as JSON: {e}")
 
-        # Navigate the JSON tree
-        entity = (
-            data.get("props", {})
-                .get("pageProps", {})
-                .get("state", {})
-                .get("data", {})
-                .get("entity", {})
+        # Check for error status or 'Page not found' in pageProps
+        page_props = data.get("props", {}).get("pageProps", {})
+        if isinstance(page_props, dict):
+            status = page_props.get("status")
+            title = page_props.get("title", "")
+            if status in (404, 403) or "not found" in str(title).lower():
+                raise RuntimeError(
+                    f"Spotify returned '{title or 'Not Found'}' for playlist '{playlist_id}'. "
+                    "If this is a personal playlist, please ensure it is set to Public on Spotify."
+                )
+
+        # Navigate the JSON tree to find the entity object across known paths
+        entity = None
+        if isinstance(page_props, dict):
+            entity = (
+                page_props.get("state", {}).get("data", {}).get("entity")
+                or page_props.get("entity")
+                or page_props.get("state", {}).get("entity")
+                or page_props.get("data", {}).get("entity")
+                or page_props.get("initialState", {}).get("entity")
+            )
+
+        # Fallback: search anywhere in data for an entity dict containing trackList or playlist data
+        if not entity or not isinstance(entity, dict):
+            def _find_entity_in_obj(obj: Any) -> dict | None:
+                if isinstance(obj, dict):
+                    if ("trackList" in obj and isinstance(obj["trackList"], list)) or (
+                        obj.get("type") in ("playlist", "album") and ("tracks" in obj or "trackList" in obj)
+                    ):
+                        return obj
+                    for v in obj.values():
+                        res = _find_entity_in_obj(v)
+                        if res:
+                            return res
+                elif isinstance(obj, list):
+                    for item in obj:
+                        res = _find_entity_in_obj(item)
+                        if res:
+                            return res
+                return None
+
+            entity = _find_entity_in_obj(data)
+
+        if not entity or not isinstance(entity, dict):
+            logger.error(
+                f"Failed to extract entity for playlist {playlist_id}. "
+                f"PageProps keys: {list(page_props.keys()) if isinstance(page_props, dict) else type(page_props)}"
+            )
+            raise RuntimeError(
+                f"Could not extract playlist data from Spotify for '{playlist_id}'. "
+                "The playlist may be private, empty, or region-restricted."
+            )
+
+        playlist_name = (
+            entity.get("name")
+            or entity.get("title")
+            or "Untitled Playlist"
+        )
+        description = entity.get("description", "") or ""
+        owner = (
+            entity.get("subtitle")
+            or (entity.get("owner", {}).get("display_name") if isinstance(entity.get("owner"), dict) else "")
+            or ""
         )
 
-        if not entity:
-            raise RuntimeError("Could not extract playlist entity from Spotify data.")
-
-        playlist_name = entity.get("name", "Untitled Playlist")
-        description = entity.get("description", "")
-        # Owner may be nested or absent
-        owner = entity.get("subtitle", "")
-
-        # Cover art — try the images array first
+        # Cover art — try images array, coverArt, or visualIdentity
         cover_art_url = ""
         images = entity.get("images", [])
-        if images:
-            # Try to get the largest image
-            best = max(images, key=lambda img: img.get("width", 0) or 0)
-            cover_art_url = best.get("url", "")
+        if isinstance(images, list) and images:
+            valid_images = [img for img in images if isinstance(img, dict)]
+            if valid_images:
+                best = max(valid_images, key=lambda img: img.get("width", 0) or 0)
+                cover_art_url = best.get("url", "")
         if not cover_art_url:
-            # Fallback: coverArt or visualIdentity
-            cover_art = entity.get("coverArt", entity.get("visualIdentity", {}))
+            cover_art = entity.get("coverArt") or entity.get("visualIdentity", {})
             if isinstance(cover_art, dict):
                 sources = cover_art.get("sources", [])
-                if sources:
-                    best = max(sources, key=lambda s: s.get("width", 0) or 0)
-                    cover_art_url = best.get("url", "")
+                if isinstance(sources, list) and sources:
+                    valid_sources = [s for s in sources if isinstance(s, dict)]
+                    if valid_sources:
+                        best = max(valid_sources, key=lambda s: s.get("width", 0) or 0)
+                        cover_art_url = best.get("url", "")
 
-        # Parse tracks
+        # Parse tracks (supports trackList, tracks, items in embed or API schemas)
         tracks: list[PlaylistTrack] = []
-        raw_tracks = entity.get("trackList", [])
+        raw_tracks = (
+            entity.get("trackList")
+            or entity.get("tracks")
+            or entity.get("items")
+            or []
+        )
+        if isinstance(raw_tracks, dict):
+            raw_tracks = raw_tracks.get("items") or []
+        if not isinstance(raw_tracks, list):
+            raw_tracks = []
+
         for item in raw_tracks:
-            title = item.get("title", "")
-            artist = item.get("subtitle", "")
+            if not isinstance(item, dict):
+                continue
+
+            track_obj = item.get("track") if isinstance(item.get("track"), dict) else item
+
+            title = (
+                track_obj.get("title")
+                or track_obj.get("name")
+                or ""
+            )
+
+            artist = track_obj.get("subtitle") or track_obj.get("artist") or ""
+            if not artist:
+                artists_list = track_obj.get("artists")
+                if isinstance(artists_list, list):
+                    artist = ", ".join(
+                        a.get("name", "") for a in artists_list if isinstance(a, dict) and a.get("name")
+                    )
+
             if not title:
                 continue
 
-            duration_ms = item.get("duration", 0) or 0
+            duration_ms = track_obj.get("duration", 0) or track_obj.get("duration_ms", 0) or 0
 
             # Track cover art
             track_cover = ""
-            cover_art_data = item.get("coverArt", {})
+            cover_art_data = track_obj.get("coverArt") or track_obj.get("album", {}).get("images", [])
             if isinstance(cover_art_data, dict):
                 sources = cover_art_data.get("sources", [])
-                if sources:
+                if isinstance(sources, list) and sources and isinstance(sources[0], dict):
                     track_cover = sources[0].get("url", "")
+            elif isinstance(cover_art_data, list) and cover_art_data and isinstance(cover_art_data[0], dict):
+                track_cover = cover_art_data[0].get("url", "")
 
             tracks.append(PlaylistTrack(
                 title=title,
@@ -429,6 +520,9 @@ class PlaylistImporter:
                 duration_ms=duration_ms,
                 cover_art_url=track_cover or cover_art_url,
             ))
+
+        if not tracks:
+            logger.warning(f"Spotify playlist '{playlist_id}' parsed but yielded 0 tracks")
 
         return PlaylistInfo(
             source="spotify",

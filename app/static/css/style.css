@@ -135,10 +135,19 @@ body {
 }
 
 @media (max-width: 768px) {
+    .header-content {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 1rem;
+    }
+    .brand { grid-column: 1; }
+    .brand .subtitle { display: none; }
+    .header-actions { grid-column: 2; display: flex; justify-content: flex-end; }
+    
     .mode-toggle {
+        grid-column: 1 / -1;
         position: static;
         transform: none;
-        order: 3;
         width: 100%;
         justify-content: center;
     }

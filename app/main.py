@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
+import tomlkit
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +27,7 @@ logger = logging.getLogger("musicrequest")
 
 # ── Configuration ────────────────────────────────────────────────────────────
 APP_PASSCODE = os.environ.get("APP_PASSCODE", "1099")
+ADMIN_PASSCODE = os.environ.get("ADMIN_PASSCODE", "password123")
 APP_SECRET_KEY = secrets.token_hex(32).encode("utf-8")
 def _get_default_config_path() -> str:
     if "STREAMRIP_CONFIG_PATH" in os.environ:
@@ -38,7 +40,12 @@ def _get_default_config_path() -> str:
     ]:
         if os.path.exists(candidate):
             return candidate
-    return "/config/config.toml"
+    
+    if os.path.isdir("/config"):
+        return "/config/config.toml"
+    if os.name == 'nt':
+        return os.path.expanduser("~/AppData/Roaming/streamrip/config.toml")
+    return os.path.expanduser("~/.config/streamrip/config.toml")
 
 
 def _get_default_music_dir() -> str:
@@ -101,24 +108,29 @@ templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 
 
 # ── Auth helpers ─────────────────────────────────────────────────────────────
-def _generate_token() -> str:
+def _generate_token(is_admin: bool = False) -> str:
     """Create an HMAC-SHA256 signed session token containing a timestamp."""
     timestamp = str(int(time.time()))
-    signature = hmac.new(APP_SECRET_KEY, timestamp.encode(), "sha256").hexdigest()
-    return f"{timestamp}.{signature}"
+    prefix = "admin." if is_admin else "user."
+    payload = f"{prefix}{timestamp}"
+    signature = hmac.new(APP_SECRET_KEY, payload.encode(), "sha256").hexdigest()
+    return f"{payload}.{signature}"
 
 
-def _verify_token(token: str) -> bool:
+def _verify_token(token: str, require_admin: bool = False) -> bool:
     """Verify the signed session token is valid and not expired (30-day TTL)."""
-    if not token or "." not in token:
+    if not token or token.count(".") != 2:
         return False
-    timestamp, signature = token.split(".", 1)
+    role, timestamp, signature = token.split(".", 2)
+    if require_admin and role != "admin":
+        return False
     try:
         if time.time() - int(timestamp) > 30 * 24 * 3600:
             return False
     except ValueError:
         return False
-    expected = hmac.new(APP_SECRET_KEY, timestamp.encode(), "sha256").hexdigest()
+    payload = f"{role}.{timestamp}"
+    expected = hmac.new(APP_SECRET_KEY, payload.encode(), "sha256").hexdigest()
     return hmac.compare_digest(signature, expected)
 
 
@@ -128,11 +140,21 @@ def _is_authenticated(request: Request) -> bool:
     return bool(token and _verify_token(token))
 
 
+def _is_admin(request: Request) -> bool:
+    """Check the admin_token cookie on the request."""
+    token = request.cookies.get("admin_token")
+    return bool(token and _verify_token(token, require_admin=True))
+
+
 async def require_auth(request: Request) -> None:
     """FastAPI dependency — raises 401 if the session cookie is missing/invalid."""
     if not _is_authenticated(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+async def require_admin(request: Request) -> None:
+    """FastAPI dependency — raises 401 if the admin cookie is missing/invalid."""
+    if not _is_admin(request):
+        raise HTTPException(status_code=401, detail="Admin Unauthorized")
 
 # ── Pydantic models ─────────────────────────────────────────────────────────
 class AuthRequest(BaseModel):
@@ -441,6 +463,68 @@ async def import_status_sse(import_id: str, request: Request) -> EventSourceResp
 
 
 # ── Settings Routes ──────────────────────────────────────────────────────────
+@app.post("/api/admin/auth")
+async def admin_auth(body: AuthRequest, response: Response) -> dict[str, Any]:
+    """Validate admin passcode and set admin session cookie."""
+    if body.passcode != ADMIN_PASSCODE:
+        raise HTTPException(status_code=401, detail="Invalid admin passcode")
+    response.set_cookie(
+        key="admin_token",
+        value=_generate_token(is_admin=True),
+        httponly=True,
+        samesite="strict",
+        max_age=30 * 24 * 3600,
+    )
+    return {"ok": True}
+
+@app.get("/api/admin/config", dependencies=[Depends(require_admin)])
+async def get_admin_config() -> dict[str, Any]:
+    """Return streamrip config."""
+    try:
+        config_path = Path(STREAMRIP_CONFIG_PATH)
+        if not config_path.exists():
+            # If the config file does not exist, return an empty config dict.
+            return {}
+        config_text = config_path.read_text(encoding="utf-8")
+        doc = tomlkit.parse(config_text)
+        return json.loads(json.dumps(doc)) # convert to dict
+    except Exception as e:
+        logger.exception("Failed to read streamrip config")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ConfigUpdateRequest(BaseModel):
+    config: dict[str, Any]
+
+@app.post("/api/admin/config", dependencies=[Depends(require_admin)])
+async def update_admin_config(body: ConfigUpdateRequest) -> dict[str, Any]:
+    """Update streamrip config interactively."""
+    try:
+        config_path = Path(STREAMRIP_CONFIG_PATH)
+        if not config_path.parent.exists():
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            
+        config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+        doc = tomlkit.parse(config_text)
+        
+        # apply changes
+        for section, values in body.config.items():
+            if section not in doc:
+                doc[section] = tomlkit.table()
+            for k, v in values.items():
+                doc[section][k] = v
+                
+        config_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        
+        # Reload streamrip config if possible
+        if handler:
+            handler.config = tomlkit.parse(config_path.read_text(encoding="utf-8"))
+            
+        return {"ok": True}
+    except Exception as e:
+        logger.exception("Failed to update streamrip config")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def _get_settings_file() -> Path:
     """Return the best writable path for persisting settings."""
     primary = Path(os.environ.get("STREAMRIP_CONFIG_PATH", "/config/config.toml")).parent / "musicrequest_settings.json"
