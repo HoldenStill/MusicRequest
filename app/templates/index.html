@@ -604,7 +604,10 @@
         }
 
         // ── Modal Controls ──────────────────────────────────────────────────
-        function closeModal() { modalOverlay.classList.remove('active'); }
+        function closeModal() {
+            stopAnalysisListening();
+            modalOverlay.classList.remove('active');
+        }
         modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
         document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
@@ -772,55 +775,134 @@
             }
         }
 
+        let activeAnalysisEvtSource = null;
+        let activeAnalysisPollInterval = null;
+
+        function stopAnalysisListening() {
+            if (activeAnalysisEvtSource) {
+                activeAnalysisEvtSource.close();
+                activeAnalysisEvtSource = null;
+            }
+            if (activeAnalysisPollInterval) {
+                clearInterval(activeAnalysisPollInterval);
+                activeAnalysisPollInterval = null;
+            }
+        }
+
         async function analyzePlaylist(url) {
+            stopAnalysisListening();
             playlistUrlCache = url;
+
             modalContent.innerHTML = `
-                <div class="analysis-loading">
+                <div class="analysis-loading" style="text-align:center;padding:1.5rem 1rem;">
                     <button class="modal-close" id="modal-close-btn">✕</button>
-                    <div class="spinner"></div>
-                    <p>Analyzing playlist...</p>
-                    <p style="font-size:0.75rem;color:var(--text-muted)">Scraping tracks, scanning library, matching on Qobuz...</p>
+                    <div class="spinner" style="margin:0 auto 1.25rem;"></div>
+                    <h3 id="analysis-step-title" style="margin:0 0 0.5rem;font-size:1.15rem;font-weight:600;">Analyzing Playlist</h3>
+                    <p id="analysis-step-desc" style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1.25rem;min-height:1.2rem;">Connecting to server...</p>
+                    <div style="width:100%;max-width:360px;margin:0 auto 1.25rem;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;height:8px;overflow:hidden;">
+                        <div id="analysis-progress-bar" style="width:5%;height:100%;background:var(--accent);transition:width 0.3s ease;"></div>
+                    </div>
+                    <button class="btn btn-secondary" id="analysis-cancel-btn" style="padding:0.4rem 1rem;font-size:0.8rem;">Cancel</button>
                 </div>
             `;
             document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+            document.getElementById('analysis-cancel-btn').addEventListener('click', closeModal);
 
+            const updateAnalysisUI = (job) => {
+                const descEl = document.getElementById('analysis-step-desc');
+                const barEl = document.getElementById('analysis-progress-bar');
+                if (descEl && job.current_step) descEl.textContent = job.current_step;
+                if (barEl && typeof job.progress === 'number') {
+                    barEl.style.width = Math.max(5, Math.min(100, job.progress)) + '%';
+                }
+
+                if (job.status === 'completed' && job.result) {
+                    stopAnalysisListening();
+                    playlistAnalysisCache = job.result;
+                    renderPlaylistPreview(job.result);
+                } else if (job.status === 'failed') {
+                    stopAnalysisListening();
+                    renderAnalysisError(job.error || 'Playlist analysis failed.');
+                }
+            };
+
+            const renderAnalysisError = (msg) => {
+                modalContent.innerHTML = `
+                    <div class="playlist-input-section">
+                        <button class="modal-close" id="modal-close-btn">✕</button>
+                        <h2 style="color:var(--error)">Analysis Failed</h2>
+                        <p style="margin:1rem 0;color:var(--text-muted);font-size:0.9rem;">${esc(msg)}</p>
+                        <button class="btn-analyze" id="btn-retry">Try Again</button>
+                    </div>
+                `;
+                document.getElementById('modal-close-btn').addEventListener('click', closeModal);
+                document.getElementById('btn-retry').addEventListener('click', () => openPlaylistInputModal());
+            };
+
+            let analysisId = null;
             try {
                 const res = await fetch('/api/playlist/analyze', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ url }),
                 });
+
                 if (!res.ok) {
-                    let errMsg = `Analysis failed (${res.status} ${res.statusText || 'Error'})`;
-                    if (res.status === 504 || res.status === 502) {
-                        errMsg = `Request timed out (${res.status}). The server or proxy took too long to analyze the playlist.`;
-                    } else {
-                        try {
-                            const d = await res.json();
-                            if (d.detail) errMsg = d.detail;
-                        } catch(e) {
-                            try {
-                                const t = await res.text();
-                                if (t && t.length < 200 && !t.includes('<html')) errMsg = t;
-                            } catch(_) {}
-                        }
-                    }
+                    let errMsg = `Server error (${res.status})`;
+                    try {
+                        const d = await res.json();
+                        if (d.detail) errMsg = d.detail;
+                    } catch(e) {}
                     throw new Error(errMsg);
                 }
+
                 const data = await res.json();
-                playlistAnalysisCache = data;
-                renderPlaylistPreview(data);
+                analysisId = data.analysis_id;
             } catch (err) {
-                modalContent.innerHTML = `
-                    <div class="playlist-input-section">
-                        <button class="modal-close" id="modal-close-btn">✕</button>
-                        <h2 style="color:var(--error)">Analysis Failed</h2>
-                        <p>${esc(err.message)}</p>
-                        <button class="btn-analyze" id="btn-retry">Try Again</button>
-                    </div>
-                `;
-                document.getElementById('modal-close-btn').addEventListener('click', closeModal);
-                document.getElementById('btn-retry').addEventListener('click', () => openPlaylistInputModal());
+                renderAnalysisError(err.message);
+                return;
+            }
+
+            // Start SSE stream with polling fallback
+            try {
+                const evtSource = new EventSource(`/api/playlist/analysis/${analysisId}/events`);
+                activeAnalysisEvtSource = evtSource;
+
+                evtSource.onmessage = (e) => {
+                    try {
+                        const job = JSON.parse(e.data);
+                        updateAnalysisUI(job);
+                    } catch (parseErr) {
+                        console.error('Failed to parse SSE payload:', parseErr);
+                    }
+                };
+
+                evtSource.onerror = () => {
+                    // Fallback to polling if SSE encounters a proxy disconnection
+                    if (activeAnalysisEvtSource) {
+                        activeAnalysisEvtSource.close();
+                        activeAnalysisEvtSource = null;
+                    }
+                    if (!activeAnalysisPollInterval) {
+                        startPollingFallback(analysisId);
+                    }
+                };
+            } catch (sseErr) {
+                startPollingFallback(analysisId);
+            }
+
+            function startPollingFallback(id) {
+                if (activeAnalysisPollInterval) return;
+                activeAnalysisPollInterval = setInterval(async () => {
+                    try {
+                        const r = await fetch(`/api/playlist/analysis/${id}/status`);
+                        if (!r.ok) return;
+                        const job = await r.json();
+                        updateAnalysisUI(job);
+                    } catch (pollErr) {
+                        console.error('Polling error:', pollErr);
+                    }
+                }, 1500);
             }
         }
 

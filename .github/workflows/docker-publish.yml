@@ -2,7 +2,7 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "feature/**" ]
     tags: [ 'v*.*.*' ]
   workflow_dispatch: # Allows manual trigger from GitHub UI
 
@@ -41,6 +41,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=test,enable=${{ startsWith(github.ref, 'refs/heads/feature/') }}
+            type=ref,event=branch
             type=semver,pattern={{version}}
             type=sha,format=short
 
