@@ -243,6 +243,38 @@ class StreamripHandler:
         else:
             return self._parse_album_results(data)
 
+    async def search_with_client(
+        self,
+        client: Any,
+        query: str,
+        limit: int = 10,
+        media_type: str = "album",
+    ) -> list[dict[str, Any]]:
+        """Search Qobuz using an existing open QobuzClient session.
+
+        Does not create or close the client session, enabling high-performance reuse across batches.
+        """
+        try:
+            url = f"https://www.qobuz.com/api.json/0.2/{media_type}/search"
+            params = {"query": query, "limit": limit}
+
+            async with client.session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    logger.warning(f"Qobuz search failed: {resp.status} - {text[:100]}")
+                    return []
+                data = await resp.json()
+
+            if media_type == "track":
+                return self._parse_track_results(data)
+            elif media_type == "artist":
+                return self._parse_artist_results(data)
+            else:
+                return self._parse_album_results(data)
+        except Exception as e:
+            logger.warning(f"Error during search_with_client for '{query}': {e}")
+            return []
+
     def _parse_album_results(self, data: dict) -> list[dict[str, Any]]:
         """Parse album search results from Qobuz API response."""
         results = []

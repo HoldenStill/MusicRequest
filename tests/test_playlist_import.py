@@ -92,3 +92,57 @@ async def test_fetch_spotify_playlist_mock_structures(monkeypatch):
     assert len(result.tracks) == 2
     assert result.tracks[0].title == "Track 1"
     assert result.tracks[1].title == "Track 2"
+
+
+@pytest.mark.asyncio
+async def test_analyze_playlist_concurrent_matching(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    mock_client = MagicMock()
+    mock_client.session = MagicMock()
+    mock_client.session.close = AsyncMock()
+
+    mock_handler = MagicMock()
+    mock_handler._create_qobuz_client = AsyncMock(return_value=(mock_client, MagicMock()))
+
+    async def mock_search_with_client(client, query, limit=10, media_type="track"):
+        parts = query.split()
+        artist = parts[0] if parts else "Artist"
+        title = " ".join(parts[1:]) if len(parts) > 1 else "Track"
+        return [{
+            "type": "track",
+            "track_id": "12345",
+            "album_id": "67890",
+            "title": title,
+            "artist": artist,
+            "duration": 180,
+        }]
+
+    mock_handler.search_with_client = AsyncMock(side_effect=mock_search_with_client)
+
+    importer = PlaylistImporter("/tmp/music", "/tmp/config", mock_handler)
+
+    # Mock fetch spotify playlist to return 10 tracks
+    async def mock_fetch(pid):
+        from app.playlist_handler import PlaylistInfo, PlaylistTrack
+        tracks = [
+            PlaylistTrack(title=f"Track {i}", artist=f"Artist {i}", duration_ms=180000)
+            for i in range(10)
+        ]
+        return PlaylistInfo(
+            source="spotify",
+            playlist_id=pid,
+            name="Test Batch Playlist",
+            tracks=tracks,
+        )
+
+    monkeypatch.setattr(importer, "_fetch_spotify_playlist", mock_fetch)
+    monkeypatch.setattr(importer, "_check_duplicates", AsyncMock())
+
+    result = await importer.analyze_playlist("https://open.spotify.com/playlist/test_batch")
+    assert len(result.tracks) == 10
+    assert mock_handler._create_qobuz_client.call_count == 1
+    assert mock_handler.search_with_client.call_count >= 10
+    mock_client.session.close.assert_awaited_once()
+    assert result.tracks[0].qobuz_track_id == "12345"
+

@@ -956,7 +956,7 @@ class PlaylistImporter:
         return index
 
     # ── Qobuz Track Matching ────────────────────────────────────────────────
-    async def _match_track_on_qobuz(self, track: PlaylistTrack) -> bool:
+    async def _match_track_on_qobuz(self, track: PlaylistTrack, client: Any = None) -> bool:
         """Search Qobuz for a matching track and populate qobuz_track_id.
 
         Returns True if a match was found.
@@ -984,7 +984,10 @@ class PlaylistImporter:
         results: list[dict[str, Any]] = []
         for query in queries_to_try:
             try:
-                results = await self.handler.search(query, limit=10, media_type="track")
+                if client:
+                    results = await self.handler.search_with_client(client, query, limit=5, media_type="track")
+                else:
+                    results = await self.handler.search(query, limit=5, media_type="track")
                 if results:
                     break
             except Exception as e:
@@ -1098,16 +1101,28 @@ class PlaylistImporter:
         # Check local duplicates (builds and discards index)
         await self._check_duplicates(playlist.tracks)
 
-        # Match missing tracks on Qobuz (with rate limiting)
+        # Match missing tracks on Qobuz
         missing = [t for t in playlist.tracks if not t.is_local]
-        for i, track in enumerate(missing):
-            if source == "qobuz" and track.qobuz_track_id:
-                track.match_confidence = 1.0
-                continue
-            await self._match_track_on_qobuz(track)
-            # Small delay to avoid hammering the API
-            if i < len(missing) - 1:
-                await asyncio.sleep(0.15)
+        if source == "qobuz":
+            for track in missing:
+                if track.qobuz_track_id:
+                    track.match_confidence = 1.0
+        elif missing:
+            client = None
+            try:
+                client, sr_config = await self.handler._create_qobuz_client()
+                sem = asyncio.Semaphore(5)
+
+                async def match_one(t: PlaylistTrack) -> None:
+                    async with sem:
+                        await self._match_track_on_qobuz(t, client=client)
+
+                await asyncio.gather(*(match_one(t) for t in missing), return_exceptions=True)
+            except Exception as e:
+                logger.warning(f"Error during batch Qobuz track matching: {e}")
+            finally:
+                if client and client.session:
+                    await client.session.close()
 
         # Force garbage collection of the library index
         gc.collect()

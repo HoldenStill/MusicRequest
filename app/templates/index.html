@@ -791,8 +791,20 @@
                     body: JSON.stringify({ url }),
                 });
                 if (!res.ok) {
-                    let errMsg = 'Analysis failed';
-                    try { const d = await res.json(); if (d.detail) errMsg = d.detail; } catch(e) {}
+                    let errMsg = `Analysis failed (${res.status} ${res.statusText || 'Error'})`;
+                    if (res.status === 504 || res.status === 502) {
+                        errMsg = `Request timed out (${res.status}). The server or proxy took too long to analyze the playlist.`;
+                    } else {
+                        try {
+                            const d = await res.json();
+                            if (d.detail) errMsg = d.detail;
+                        } catch(e) {
+                            try {
+                                const t = await res.text();
+                                if (t && t.length < 200 && !t.includes('<html')) errMsg = t;
+                            } catch(_) {}
+                        }
+                    }
                     throw new Error(errMsg);
                 }
                 const data = await res.json();
@@ -863,6 +875,7 @@
                             <span class="stat-item local"><strong>${data.local_tracks}</strong> local</span>
                             <span class="stat-item missing"><strong>${matchedCount}</strong> matched for download</span>
                             ${unmatchedCount > 0 ? `<span class="stat-item" style="color:var(--warning)"><strong>${unmatchedCount}</strong> not on Qobuz</span>` : ''}
+                            ${data.source === 'spotify' && data.total_tracks >= 100 ? `<span class="stat-item" style="color:var(--text-muted);font-style:italic;" title="Spotify public embed limits to first 100 tracks">(first 100 tracks)</span>` : ''}
                         </div>
                     </div>
                 </div>
