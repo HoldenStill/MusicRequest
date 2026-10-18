@@ -20,7 +20,6 @@ RUN set -eux; \
     pip install \
         --no-cache-dir \
         --no-compile \
-        --no-binary Pillow \
         --prefix=/install \
         -r requirements.txt; \
     # Remove all package test suites & Cryptodome test vectors (~15MB saved)
