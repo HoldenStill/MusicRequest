@@ -11,3 +11,4 @@ yt-dlp
 asyncache
 cachetools
 mutagen
+pyotp>=2.9.0

@@ -8,11 +8,14 @@ checking for local duplicates, downloading missing tracks, and generating
 from __future__ import annotations
 
 import asyncio
+import base64
 import gc
 import json
 import logging
 import os
+import pyotp
 import re
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
@@ -273,6 +276,61 @@ class PlaylistInfo:
             "tracks": [t.to_dict() for t in self.tracks],
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PlaylistInfo:
+        """Reconstruct a PlaylistInfo object from a dictionary."""
+        tracks = [
+            PlaylistTrack(
+                title=t.get("title", ""),
+                artist=t.get("artist", ""),
+                duration_ms=t.get("duration_ms", 0),
+                album_title=t.get("album_title", ""),
+                cover_art_url=t.get("cover_art_url", ""),
+                isrc=t.get("isrc", ""),
+                is_local=t.get("is_local", False),
+                local_path=t.get("local_path", ""),
+                qobuz_track_id=t.get("qobuz_track_id", ""),
+                qobuz_album_id=t.get("qobuz_album_id", ""),
+                matched_title=t.get("matched_title", ""),
+                matched_artist=t.get("matched_artist", ""),
+                match_confidence=t.get("match_confidence", 0.0),
+            )
+            for t in data.get("tracks", [])
+        ]
+        return cls(
+            source=data.get("source", "spotify"),
+            playlist_id=data.get("playlist_id", ""),
+            name=data.get("name", "Untitled"),
+            description=data.get("description", ""),
+            owner=data.get("owner", ""),
+            cover_art_url=data.get("cover_art_url", ""),
+            tracks=tracks,
+        )
+
+
+@dataclass
+class AnalysisJob:
+    """Tracks the state of an asynchronous playlist analysis operation."""
+    analysis_id: str
+    url: str
+    status: str = "pending"  # pending, scraping, indexing, matching, completed, failed
+    progress: int = 0        # 0 to 100 percentage
+    current_step: str = "Initializing analysis..."
+    result: dict[str, Any] | None = None
+    playlist_info: PlaylistInfo | None = None
+    error: str = ""
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "analysis_id": self.analysis_id,
+            "status": self.status,
+            "progress": self.progress,
+            "current_step": self.current_step,
+            "error": self.error,
+            "result": self.result,
+        }
+
 
 @dataclass
 class ImportJob:
@@ -317,9 +375,25 @@ class PlaylistImporter:
         self.jellyfin_url = jellyfin_url.rstrip("/") if jellyfin_url else ""
         self.jellyfin_api_key = jellyfin_api_key
 
+        # Active analysis jobs & subscribers
+        self.analysis_jobs: dict[str, AnalysisJob] = {}
+        self._analysis_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+
         # Active import jobs
         self.import_jobs: dict[str, ImportJob] = {}
         self._import_subscribers: dict[str, set[asyncio.Queue]] = {}
+
+        # Cached library index: (timestamp, index_dict)
+        self._cached_library_index: tuple[float, dict[str, Any]] | None = None
+        self._library_cache_ttl: float = 300.0  # 5 minutes
+
+        # Spotify Web Player auth state & hash (zero-setup pagination)
+        self._spotify_access_token: str | None = None
+        self._spotify_token_expires_at: float = 0.0
+        self._spotify_client_token: str | None = None
+        self._spotify_client_version: str = "1.3.7.496.ga9aacef93081"
+        self._spotify_device_id: str = "00000000-0000-0000-0000-000000000000"
+        self._spotify_fetch_playlist_hash: str = "21ea11a6ac75a5f3e01fd365d29c18e0a4a8b7dc09f89bbb5d73910190c6acaf"
 
     # ── URL Parsing ──────────────────────────────────────────────────────────
     @staticmethod
@@ -341,7 +415,259 @@ class PlaylistImporter:
         )
 
     # ── Spotify Scraping ─────────────────────────────────────────────────────
+    async def _get_spotify_auth(self, session: aiohttp.ClientSession) -> tuple[str, str, str]:
+        """Obtain or reuse cached Spotify Web Player accessToken and clientToken."""
+        now = time.time()
+        if (
+            self._spotify_access_token
+            and self._spotify_client_token
+            and self._spotify_client_version
+            and now < (self._spotify_token_expires_at - 60)
+        ):
+            return self._spotify_access_token, self._spotify_client_token, self._spotify_client_version
+
+        # 1. Fetch open.spotify.com to get clientVersion and device ID
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
+        }
+        async with session.get("https://open.spotify.com", headers=headers) as resp:
+            if resp.status == 200:
+                html = await resp.text()
+                match = re.search(r'<script id="appServerConfig" type="text/plain">(.*?)</script>', html)
+                if match:
+                    try:
+                        cfg = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
+                        if cfg.get("clientVersion"):
+                            self._spotify_client_version = cfg["clientVersion"]
+                    except Exception:
+                        pass
+                for cookie in session.cookie_jar:
+                    if cookie.key == "sp_t":
+                        self._spotify_device_id = cookie.value
+                        break
+
+        if not self._spotify_client_version:
+            self._spotify_client_version = "1.3.7.496.ga9aacef93081"
+        if not self._spotify_device_id:
+            self._spotify_device_id = str(uuid.uuid4())
+
+        # 2. Get TOTP access token + client_id
+        version = 18
+        secret_bytes = bytearray([44, 55, 47, 42, 70, 40, 34, 114, 76, 74, 50, 111, 120, 97, 75, 76, 94, 102, 43, 69, 49, 120, 118, 80, 64, 78])
+        transformed = [e ^ ((t % 33) + 9) for t, e in enumerate(secret_bytes)]
+        hex_str = "".join(str(num) for num in transformed).encode().hex()
+        secret = base64.b32encode(bytes.fromhex(hex_str)).decode().rstrip("=")
+        totp = pyotp.TOTP(secret).now()
+
+        tok_url = (
+            f"https://open.spotify.com/api/token?reason=init&productType=web-player"
+            f"&totp={totp}&totpVer={version}&totpServer={totp}"
+        )
+        async with session.get(tok_url, headers=headers) as resp:
+            if resp.status != 200:
+                txt = await resp.text()
+                raise RuntimeError(f"Spotify token endpoint failed: HTTP {resp.status} - {txt[:100]}")
+            tok_data = json.loads(await resp.text())
+
+        access_token = tok_data.get("accessToken")
+        client_id = tok_data.get("clientId")
+        expires_ms = tok_data.get("accessTokenExpirationTimestampMs") or (now * 1000 + 3600 * 1000)
+        if not access_token or not client_id:
+            raise RuntimeError("Missing accessToken or clientId from Spotify token response")
+
+        # 3. Get client token
+        ct_url = "https://clienttoken.spotify.com/v1/clienttoken"
+        ct_payload = {
+            "client_data": {
+                "client_version": self._spotify_client_version,
+                "client_id": client_id,
+                "js_sdk_data": {
+                    "device_brand": "unknown",
+                    "device_model": "unknown",
+                    "os": "windows",
+                    "os_version": "NT 10.0",
+                    "device_id": self._spotify_device_id,
+                    "device_type": "computer",
+                },
+            }
+        }
+        ct_headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        async with session.post(ct_url, json=ct_payload, headers=ct_headers) as resp:
+            if resp.status != 200:
+                txt = await resp.text()
+                raise RuntimeError(f"Spotify clienttoken endpoint failed: HTTP {resp.status} - {txt[:100]}")
+            ct_data = json.loads(await resp.text())
+
+        client_token = ct_data.get("granted_token", {}).get("token")
+        if not client_token:
+            raise RuntimeError(f"Missing client token in response: {ct_data}")
+
+        self._spotify_access_token = access_token
+        self._spotify_client_token = client_token
+        self._spotify_token_expires_at = float(expires_ms) / 1000.0
+
+        return access_token, client_token, self._spotify_client_version
+
+    async def _fetch_spotify_pathfinder(self, playlist_id: str) -> PlaylistInfo:
+        """Fetch complete Spotify playlist via Pathfinder GraphQL with pagination."""
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://open.spotify.com/",
+        }
+
+        async with aiohttp.ClientSession(headers=headers) as session:
+            access_tok, client_tok, client_ver = await self._get_spotify_auth(session)
+
+            query_url = "https://api-partner.spotify.com/pathfinder/v1/query"
+            query_headers = {
+                "Authorization": f"Bearer {access_tok}",
+                "Client-Token": client_tok,
+                "Spotify-App-Version": client_ver,
+                "Content-Type": "application/json;charset=UTF-8",
+                "Accept": "application/json",
+            }
+
+            offset = 0
+            limit = 343  # Maximum limit supported by Spotify pathfinder query
+            total_count = None
+            playlist_name = ""
+            description = ""
+            owner = ""
+            cover_art_url = ""
+            tracks: list[PlaylistTrack] = []
+
+            while total_count is None or offset < total_count:
+                params = {
+                    "operationName": "fetchPlaylist",
+                    "variables": json.dumps({
+                        "uri": f"spotify:playlist:{playlist_id}",
+                        "offset": offset,
+                        "limit": limit,
+                        "enableWatchFeedEntrypoint": False,
+                    }),
+                    "extensions": json.dumps({
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": self._spotify_fetch_playlist_hash,
+                        }
+                    }),
+                }
+
+                async with session.post(query_url, headers=query_headers, params=params) as resp:
+                    if resp.status in (404, 400):
+                        txt = await resp.text()
+                        if "not found" in txt.lower() or "invalid" in txt.lower():
+                            raise RuntimeError(
+                                f"Spotify playlist '{playlist_id}' was not found. "
+                                "Please ensure the playlist is set to Public on Spotify."
+                            )
+                        raise RuntimeError(f"Spotify Pathfinder API returned HTTP {resp.status}: {txt[:200]}")
+                    elif resp.status != 200:
+                        txt = await resp.text()
+                        raise RuntimeError(f"Spotify Pathfinder API returned HTTP {resp.status}: {txt[:200]}")
+
+                    res = json.loads(await resp.text())
+
+                pv2 = res.get("data", {}).get("playlistV2")
+                if not pv2:
+                    raise RuntimeError("Spotify returned empty playlist data")
+
+                if not playlist_name:
+                    playlist_name = pv2.get("name") or "Untitled Playlist"
+                    description = pv2.get("description") or ""
+                    owner = pv2.get("ownerV2", {}).get("data", {}).get("name") or ""
+                    images_items = pv2.get("images", {}).get("items", [])
+                    if images_items and isinstance(images_items, list):
+                        sources = images_items[0].get("sources", [])
+                        if sources and isinstance(sources, list):
+                            cover_art_url = sources[0].get("url") or ""
+
+                content = pv2.get("content", {})
+                if total_count is None:
+                    total_count = content.get("totalCount", 0)
+
+                items = content.get("items", [])
+                if not items:
+                    break
+
+                for item in items:
+                    data = item.get("itemV2", {}).get("data", {})
+                    title = data.get("name")
+                    if not title:
+                        continue
+
+                    duration_ms = data.get("trackDuration", {}).get("totalMilliseconds", 0) or 0
+                    artists_items = data.get("artists", {}).get("items", [])
+                    artists = [
+                        a.get("profile", {}).get("name")
+                        for a in artists_items
+                        if isinstance(a, dict) and a.get("profile", {}).get("name")
+                    ]
+                    artist = ", ".join(filter(None, artists))
+
+                    cover_sources = data.get("albumOfTrack", {}).get("coverArt", {}).get("sources", [])
+                    track_cover = cover_sources[0].get("url", "") if cover_sources else ""
+
+                    tracks.append(PlaylistTrack(
+                        title=title,
+                        artist=artist,
+                        duration_ms=duration_ms,
+                        cover_art_url=track_cover or cover_art_url,
+                    ))
+
+                offset += len(items)
+                if len(items) == 0 or offset >= total_count:
+                    break
+
+            if not tracks:
+                raise RuntimeError(f"Spotify playlist '{playlist_id}' yielded 0 tracks")
+
+            logger.info(
+                f"Successfully parsed Spotify playlist '{playlist_name}' ({playlist_id}) "
+                f"with {len(tracks)} tracks (total reported: {total_count})"
+            )
+
+            return PlaylistInfo(
+                source="spotify",
+                playlist_id=playlist_id,
+                name=playlist_name,
+                description=description,
+                owner=owner,
+                cover_art_url=cover_art_url,
+                tracks=tracks,
+            )
+
     async def _fetch_spotify_playlist(self, playlist_id: str) -> PlaylistInfo:
+        """Fetch complete playlist metadata + tracks from Spotify.
+
+        Primary method: Spotify Web Player Pathfinder GraphQL (supports full pagination
+        of all tracks, up to thousands).
+        Fallback method: Spotify embed page scraper (first 100 tracks).
+        """
+        try:
+            info = await self._fetch_spotify_pathfinder(playlist_id)
+            if info and info.tracks:
+                return info
+        except Exception as e:
+            err_msg = str(e)
+            if "not found" in err_msg.lower() or "public" in err_msg.lower():
+                raise
+            logger.warning(
+                f"Pathfinder API failed for Spotify playlist '{playlist_id}' ({e}); "
+                "falling back to embed page scraper."
+            )
+
+        return await self._fetch_spotify_embed(playlist_id)
+
+    async def _fetch_spotify_embed(self, playlist_id: str) -> PlaylistInfo:
         """Scrape a Spotify embed page to extract playlist metadata + tracks."""
         url = f"https://open.spotify.com/embed/playlist/{playlist_id}"
         headers = {
@@ -618,15 +944,30 @@ class PlaylistImporter:
             tracks=tracks,
         )
 
-    # ── Library Indexing (On-Demand, Mutagen) ────────────────────────────────
-    async def _build_library_index(self) -> dict[str, Any]:
+    # ── Library Indexing (Cached with TTL) ───────────────────────────────────
+    async def _build_library_index(self, force_refresh: bool = False) -> dict[str, Any]:
         """Scan the music directory for audio files, read tags with mutagen,
         and return a structured index with direct keys and title fallback mapping.
 
-        This runs in a thread to avoid blocking the event loop.
-        The index is built on-demand and discarded after use.
+        Caches the index in memory for 5 minutes so repeated analyses do not re-scan disk.
         """
-        return await asyncio.to_thread(self._scan_library_sync)
+        now = time.time()
+        if not force_refresh and self._cached_library_index is not None:
+            cached_time, cached_index = self._cached_library_index
+            if (now - cached_time) < self._library_cache_ttl:
+                logger.info(
+                    f"Using cached library index ({int(now - cached_time)}s old, "
+                    f"{len(cached_index.get('keys', {}))} lookup keys)"
+                )
+                return cached_index
+
+        index = await asyncio.to_thread(self._scan_library_sync)
+        self._cached_library_index = (now, index)
+        return index
+
+    def invalidate_library_cache(self) -> None:
+        """Invalidate the cached library index so the next lookup rescans disk."""
+        self._cached_library_index = None
 
     def _scan_library_sync(self) -> dict[str, Any]:
         """Synchronous library scanner using mutagen and filesystem fallbacks."""
@@ -1081,12 +1422,110 @@ class PlaylistImporter:
 
         return False
 
-    # ── Analyze Playlist (Public API) ────────────────────────────────────────
-    async def analyze_playlist(self, url: str) -> PlaylistInfo:
-        """Full analysis pipeline: parse URL → fetch tracks → check duplicates.
+    # ── Asynchronous Playlist Analysis (Non-blocking SSE) ───────────────────
+    def start_analysis(self, url: str) -> AnalysisJob:
+        """Create and start a background analysis job, returning immediately."""
+        analysis_id = str(uuid.uuid4())
+        job = AnalysisJob(analysis_id=analysis_id, url=url)
+        self.analysis_jobs[analysis_id] = job
+        asyncio.create_task(self._run_analysis(job))
+        return job
 
-        The library index is built on-demand and garbage-collected after use.
-        """
+    async def _run_analysis(self, job: AnalysisJob) -> None:
+        """Background worker that performs playlist analysis with real-time SSE progress."""
+        try:
+            job.status = "scraping"
+            job.current_step = "Parsing playlist link..."
+            job.progress = 5
+            self._notify_analysis_subscribers(job)
+
+            source, playlist_id = self.parse_playlist_url(job.url)
+            job.current_step = f"Fetching playlist tracks from {source.capitalize()}..."
+            job.progress = 15
+            self._notify_analysis_subscribers(job)
+
+            # 1. Fetch playlist metadata + tracks
+            if source == "spotify":
+                playlist = await self._fetch_spotify_playlist(playlist_id)
+            else:
+                playlist = await self._fetch_qobuz_playlist(playlist_id)
+
+            if not playlist.tracks:
+                job.status = "completed"
+                job.current_step = "No tracks found in playlist."
+                job.progress = 100
+                job.result = playlist.to_dict()
+                self._notify_analysis_subscribers(job)
+                return
+
+            total_tracks = len(playlist.tracks)
+            job.status = "indexing"
+            job.current_step = f"Checking local library for duplicates ({total_tracks} tracks)..."
+            job.progress = 30
+            self._notify_analysis_subscribers(job)
+
+            # 2. Check local duplicates (builds/uses cached index)
+            await self._check_duplicates(playlist.tracks)
+
+            local_count = sum(1 for t in playlist.tracks if t.is_local)
+            missing = [t for t in playlist.tracks if not t.is_local]
+            job.current_step = f"Found {local_count} local track(s). Matching {len(missing)} missing track(s)..."
+            job.progress = 45
+            self._notify_analysis_subscribers(job)
+
+            # 3. Match missing tracks on Qobuz
+            if source == "qobuz":
+                for track in missing:
+                    if track.qobuz_track_id:
+                        track.match_confidence = 1.0
+                job.progress = 95
+            elif missing:
+                job.status = "matching"
+                client = None
+                try:
+                    client, sr_config = await self.handler._create_qobuz_client()
+                    sem = asyncio.Semaphore(5)
+                    matched_done = 0
+                    total_missing = len(missing)
+
+                    async def match_one(t: PlaylistTrack) -> None:
+                        nonlocal matched_done
+                        async with sem:
+                            await self._match_track_on_qobuz(t, client=client)
+                            matched_done += 1
+                            pct = 45 + int((matched_done / total_missing) * 50)
+                            job.progress = min(pct, 95)
+                            job.current_step = f"Matching tracks on Qobuz: {matched_done} / {total_missing}..."
+                            self._notify_analysis_subscribers(job)
+
+                    await asyncio.gather(*(match_one(t) for t in missing), return_exceptions=True)
+                except Exception as e:
+                    logger.warning(f"Error during batch Qobuz track matching: {e}")
+                finally:
+                    if client and client.session:
+                        await client.session.close()
+
+            gc.collect()
+
+            result_dict = playlist.to_dict()
+            job.playlist_info = playlist
+            job.status = "completed"
+            job.current_step = "Analysis complete!"
+            job.progress = 100
+            job.result = result_dict
+            self._notify_analysis_subscribers(job)
+
+        except Exception as e:
+            logger.exception(f"Analysis failed for {job.url}")
+            job.status = "failed"
+            job.error = str(e)
+            job.current_step = f"Analysis failed: {e}"
+            job.progress = 100
+            self._notify_analysis_subscribers(job)
+
+    # ── Analyze Playlist (Synchronous Helper) ────────────────────────────────
+    async def analyze_playlist(self, url: str) -> PlaylistInfo:
+        """Full analysis pipeline: parse URL → fetch tracks → check duplicates."""
         source, playlist_id = self.parse_playlist_url(url)
 
         # Fetch playlist metadata + tracks
@@ -1474,6 +1913,30 @@ class PlaylistImporter:
                         logger.warning(f"Failed to upload Jellyfin playlist cover: HTTP {resp.status} - {text}")
             except Exception as e:
                 logger.error(f"Error uploading cover art to Jellyfin: {e}")
+
+    # ── Analysis Job Subscriptions (SSE) ────────────────────────────────────
+    def subscribe_analysis(self, analysis_id: str) -> asyncio.Queue:
+        """Subscribe to analysis job progress updates via SSE."""
+        q: asyncio.Queue = asyncio.Queue()
+        if analysis_id not in self._analysis_subscribers:
+            self._analysis_subscribers[analysis_id] = set()
+        self._analysis_subscribers[analysis_id].add(q)
+        return q
+
+    def unsubscribe_analysis(self, analysis_id: str, q: asyncio.Queue) -> None:
+        """Unsubscribe from analysis job updates."""
+        if analysis_id in self._analysis_subscribers:
+            self._analysis_subscribers[analysis_id].discard(q)
+
+    def _notify_analysis_subscribers(self, job: AnalysisJob) -> None:
+        """Send analysis job status to all connected SSE subscribers."""
+        subs = self._analysis_subscribers.get(job.analysis_id, set())
+        status = job.to_dict()
+        for q in subs:
+            try:
+                q.put_nowait(status)
+            except asyncio.QueueFull:
+                pass
 
     # ── Import Job Subscriptions (SSE) ───────────────────────────────────────
     def subscribe_import(self, import_id: str) -> asyncio.Queue:

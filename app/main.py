@@ -381,20 +381,78 @@ _analyzed_playlists: TTLCache = TTLCache(maxsize=50, ttl=600)
 
 @app.post("/api/playlist/analyze", dependencies=[Depends(require_auth)])
 async def analyze_playlist(body: PlaylistAnalyzeRequest) -> dict[str, Any]:
-    """Analyze a Spotify or Qobuz playlist URL: parse tracks, check duplicates, match on Qobuz."""
+    """Start an asynchronous playlist analysis job, returning immediately with analysis_id."""
     if not playlist_importer:
         raise HTTPException(status_code=503, detail="Playlist importer not initialized")
     try:
-        result = await playlist_importer.analyze_playlist(body.url)
-        # Cache for the import step
-        cache_key = f"{result.source}:{result.playlist_id}"
-        _analyzed_playlists[cache_key] = result
-        return result.to_dict()
+        # Validate URL format before starting background task
+        playlist_importer.parse_playlist_url(body.url)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        job = playlist_importer.start_analysis(body.url)
+        return {"analysis_id": job.analysis_id, "status": job.status}
     except Exception as e:
-        logger.exception("Playlist analysis failed")
+        logger.exception("Failed to start playlist analysis")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/playlist/analysis/{analysis_id}/events", dependencies=[Depends(require_auth)])
+async def playlist_analysis_events(analysis_id: str, request: Request) -> EventSourceResponse:
+    """SSE stream for real-time playlist analysis progress updates."""
+    if not playlist_importer:
+        raise HTTPException(status_code=503, detail="Playlist importer not initialized")
+
+    job = playlist_importer.analysis_jobs.get(analysis_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis job not found")
+
+    sub_queue = playlist_importer.subscribe_analysis(analysis_id)
+
+    async def event_generator() -> AsyncGenerator[dict[str, Any], None]:
+        try:
+            # Yield initial snapshot immediately
+            yield {"data": json.dumps(job.to_dict())}
+            if job.status in ("completed", "failed"):
+                if job.playlist_info:
+                    cache_key = f"{job.playlist_info.source}:{job.playlist_info.playlist_id}"
+                    _analyzed_playlists[cache_key] = job.playlist_info
+                return
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(sub_queue.get(), timeout=10.0)
+                    if data.get("status") == "completed" and job.playlist_info:
+                        cache_key = f"{job.playlist_info.source}:{job.playlist_info.playlist_id}"
+                        _analyzed_playlists[cache_key] = job.playlist_info
+                    yield {"data": json.dumps(data)}
+                    if data.get("status") in ("completed", "failed"):
+                        break
+                except asyncio.TimeoutError:
+                    # Keep-alive ping to prevent proxy/browser 504 timeouts
+                    yield {"event": "ping", "data": ""}
+        finally:
+            playlist_importer.unsubscribe_analysis(analysis_id, sub_queue)
+
+    return EventSourceResponse(event_generator())
+
+
+@app.get("/api/playlist/analysis/{analysis_id}/status", dependencies=[Depends(require_auth)])
+async def playlist_analysis_status(analysis_id: str) -> dict[str, Any]:
+    """Polling fallback endpoint for playlist analysis progress."""
+    if not playlist_importer:
+        raise HTTPException(status_code=503, detail="Playlist importer not initialized")
+    job = playlist_importer.analysis_jobs.get(analysis_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis job not found")
+    data = job.to_dict()
+    if data.get("status") == "completed" and job.playlist_info:
+        cache_key = f"{job.playlist_info.source}:{job.playlist_info.playlist_id}"
+        _analyzed_playlists[cache_key] = job.playlist_info
+    return data
 
 
 @app.post("/api/playlist/import", dependencies=[Depends(require_auth)])
@@ -411,10 +469,25 @@ async def import_playlist(body: PlaylistImportRequest) -> dict[str, Any]:
     cache_key = f"{source}:{playlist_id}"
     playlist = _analyzed_playlists.get(cache_key)
 
+    # Check active/completed analysis jobs if not in cache
+    if not playlist:
+        for job in playlist_importer.analysis_jobs.values():
+            if job.playlist_info and job.playlist_info.source == source and job.playlist_info.playlist_id == playlist_id:
+                playlist = job.playlist_info
+                _analyzed_playlists[cache_key] = playlist
+                break
+
+    # If cached as dict, convert to PlaylistInfo
+    if isinstance(playlist, dict):
+        from app.playlist_handler import PlaylistInfo
+        playlist = PlaylistInfo.from_dict(playlist)
+        _analyzed_playlists[cache_key] = playlist
+
     if not playlist:
         # Re-analyze if not cached
         try:
             playlist = await playlist_importer.analyze_playlist(body.url)
+            _analyzed_playlists[cache_key] = playlist
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
