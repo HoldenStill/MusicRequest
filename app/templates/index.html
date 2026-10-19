@@ -957,7 +957,6 @@
                             <span class="stat-item local"><strong>${data.local_tracks}</strong> local</span>
                             <span class="stat-item missing"><strong>${matchedCount}</strong> matched for download</span>
                             ${unmatchedCount > 0 ? `<span class="stat-item" style="color:var(--warning)"><strong>${unmatchedCount}</strong> not on Qobuz</span>` : ''}
-                            ${data.source === 'spotify' && data.total_tracks >= 100 ? `<span class="stat-item" style="color:var(--text-muted);font-style:italic;" title="Spotify public embed limits to first 100 tracks">(first 100 tracks)</span>` : ''}
                         </div>
                     </div>
                 </div>

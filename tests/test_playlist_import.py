@@ -30,7 +30,7 @@ async def test_fetch_spotify_playlist_live():
     playlist = await importer._fetch_spotify_playlist("4O0n9UYw9v6GbluyjFLODb")
     assert playlist.source == "spotify"
     assert playlist.name == "1000 songs, 1000 artists"
-    assert len(playlist.tracks) > 0
+    assert len(playlist.tracks) > 100, f"Expected >100 tracks, got {len(playlist.tracks)}"
     assert playlist.tracks[0].title
     assert playlist.tracks[0].artist
 
