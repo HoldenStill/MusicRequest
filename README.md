@@ -229,7 +229,8 @@ chunked_transfer_encoding off;
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `APP_PASSCODE` | `your_secure_passcode` | Passcode required to access the web UI |
+| `APP_PASSCODE` | `your_secure_passcode` | Passcode required to access the web UI (also used as fallback for `/mcp` if `MCP_API_TOKEN` is unset) |
+| `MCP_API_TOKEN` | *(falls back to `APP_PASSCODE`)* | Bearer token for authenticating to the built-in `/mcp` endpoint |
 | `STREAMRIP_CONFIG_PATH` | `/config/config.toml` | Path to streamrip configuration file |
 | `MUSIC_DIR` | `/music` | Server directory where music is downloaded |
 | `SEARCH_LIMIT` | `10` | Maximum number of search results returned |

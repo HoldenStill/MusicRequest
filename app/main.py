@@ -18,7 +18,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
+from starlette.routing import Route
 
+from app.mcp_server import create_mcp_asgi_app, create_mcp_sub_app, mcp_server
 from app.streamrip_handler import StreamripHandler
 from app.playlist_handler import PlaylistImporter
 from app.youtube_handler import YoutubeHandler
@@ -76,10 +78,23 @@ playlist_importer: PlaylistImporter | None = None
 yt_handler: YoutubeHandler | None = None
 
 
+def get_mcp_token() -> str:
+    """Return the Bearer token for /mcp (MCP_API_TOKEN or fallback to APP_PASSCODE)."""
+    mcp_token = os.environ.get("MCP_API_TOKEN", "").strip()
+    if mcp_token:
+        return mcp_token
+    if "APP_PASSCODE" in os.environ:
+        return os.environ["APP_PASSCODE"].strip()
+    return APP_PASSCODE.strip()
+
+
+mcp_asgi_app = create_mcp_asgi_app(get_mcp_token)
+
+
 # ── Lifespan ─────────────────────────────────────────────────────────────────
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Initialize the StreamripHandler, PlaylistImporter, and start the download worker."""
+    """Initialize the StreamripHandler, PlaylistImporter, MCP session manager, and download workers."""
     global handler, playlist_importer, yt_handler
     logger.info("Starting MusicRequest (config=%s, music=%s)", STREAMRIP_CONFIG_PATH, MUSIC_DIR)
     handler = StreamripHandler(config_path=STREAMRIP_CONFIG_PATH, music_dir=MUSIC_DIR)
@@ -93,7 +108,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         jellyfin_url=JELLYFIN_URL,
         jellyfin_api_key=JELLYFIN_API_KEY,
     )
-    yield
+    mcp_asgi_app.app = create_mcp_sub_app()
+    async with mcp_server.session_manager.run():
+        yield
     if handler:
         await handler.stop_worker()
     if yt_handler:
@@ -104,6 +121,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 # ── App creation ─────────────────────────────────────────────────────────────
 app = FastAPI(title="MusicRequest", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+app.router.routes.append(
+    Route("/mcp", endpoint=mcp_asgi_app, methods=["GET", "POST", "DELETE"])
+)
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 
 

@@ -1,8 +1,8 @@
-# MusicRequest MCP Server for Hermes Agent
+# Built-in MusicRequest MCP Server (Streamable HTTP)
 
-A Model Context Protocol (MCP) server that links your self-hosted **MusicRequest** instance into **Hermes Agent**.
+MusicRequest includes a native **Model Context Protocol (MCP)** server hosted directly inside the FastAPI application at **`/mcp`** using the **Streamable HTTP** transport.
 
-This allows Hermes Agent to search the high-resolution Qobuz music catalog, inspect tracklists, enqueue album or track downloads, check download progress, and automate music acquisition alongside your existing Jellyfin server.
+This allows **Hermes Agent** to connect directly over HTTP/HTTPS without spawning external Python subprocesses or managing local scripts.
 
 ---
 
@@ -18,86 +18,61 @@ This allows Hermes Agent to search the high-resolution Qobuz music catalog, insp
 
 ---
 
-## Configuration & Environment Variables
+## Authentication
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `MUSICREQUEST_URL` | No | `http://localhost:8080` | Base URL of your MusicRequest instance |
-| `MUSICREQUEST_PASSCODE` | Yes | `1099` | Passcode configured on MusicRequest (`APP_PASSCODE`) |
-| `MUSICREQUEST_DEFAULT_QUALITY` | No | *(Server default)* | Optional default quality override (1: 320k MP3, 2: 16/44.1 CD FLAC, 3: 24/≤96 Hi-Res, 4: 24/≥96 Hi-Res) |
+The `/mcp` endpoint is protected by **Bearer token authentication** (`Authorization: Bearer <token>`):
+
+- **`MCP_API_TOKEN`** *(recommended)*: Dedicated token for MCP clients.
+- **`APP_PASSCODE`** *(fallback)*: Used if `MCP_API_TOKEN` is unset.
+- If neither is configured (empty), `/mcp` fails closed and rejects all requests with `401 Unauthorized`.
 
 ---
 
-## Hermes Agent MCP Setup
+## Hermes Agent MCP Configuration
 
-You can configure the MCP server in your Hermes Agent MCP config file (e.g. `config.json` or `config.yaml`).
+Configure Hermes Agent to connect to your MusicRequest server's `/mcp` URL using Streamable HTTP transport and the `Authorization` header.
 
-### Option A: Running with `uv` (Recommended)
-
-Since `musicrequest_mcp.py` uses PEP 723 inline script metadata, `uv` will automatically provision `mcp` and `httpx` dependencies without manual virtualenv management.
-
-#### JSON Configuration:
+### JSON Configuration
 ```json
 {
   "mcpServers": {
     "musicrequest-api": {
-      "command": "uv",
-      "args": [
-        "run",
-        "/path/to/MusicRequest/mcp/musicrequest_mcp.py"
-      ],
-      "env": {
-        "MUSICREQUEST_URL": "http://192.168.1.50:8080",
-        "MUSICREQUEST_PASSCODE": "your_secure_passcode",
-        "MUSICREQUEST_DEFAULT_QUALITY": "3"
+      "transport": "streamable_http",
+      "url": "https://music.yourdomain.com/mcp",
+      "headers": {
+        "Authorization": "Bearer your_mcp_api_token"
       }
     }
   }
 }
 ```
 
-#### YAML Configuration:
+### YAML Configuration
 ```yaml
 mcpServers:
   musicrequest-api:
-    command: uv
-    args:
-      - run
-      - /path/to/MusicRequest/mcp/musicrequest_mcp.py
-    env:
-      MUSICREQUEST_URL: "http://192.168.1.50:8080"
-      MUSICREQUEST_PASSCODE: "your_secure_passcode"
-      MUSICREQUEST_DEFAULT_QUALITY: "3"
+    transport: streamable_http
+    url: "https://music.yourdomain.com/mcp"
+    headers:
+      Authorization: "Bearer your_mcp_api_token"
 ```
+
+*(For local/LAN access without TLS, use `http://<server-ip>:8080/mcp`.)*
 
 ---
 
-### Option B: Running with standard Python inside a venv
+## Reverse Proxy Notes (Nginx Proxy Manager)
 
-If your Hermes environment runs inside a dedicated virtual environment:
-
-```json
-{
-  "mcpServers": {
-    "musicrequest-api": {
-      "command": "/path/to/venv/bin/python",
-      "args": [
-        "/path/to/MusicRequest/mcp/musicrequest_mcp.py"
-      ],
-      "env": {
-        "MUSICREQUEST_URL": "http://192.168.1.50:8080",
-        "MUSICREQUEST_PASSCODE": "your_secure_passcode"
-      }
-    }
-  }
-}
-```
+If MusicRequest is exposed behind **Nginx Proxy Manager**:
+- Standard HTTP/HTTPS forwarding works out of the box for `/mcp`.
+- Ensure **proxy buffering is disabled** (`proxy_buffering off;` in the Advanced tab, as already recommended in the main [README.md](../README.md)) so Streamable HTTP SSE responses stream immediately without buffering delays.
+- If you enabled an **Nginx Access List (HTTP Basic Auth)** on the proxy host, either bypass it for `/mcp` or configure your MCP client accordingly, since `/mcp` already enforces `Authorization: Bearer` authentication.
 
 ---
 
 ## Recommended Hermes Agent Workflow & System Prompt
 
-To achieve smooth, autonomous media management between **Jellyfin** and **MusicRequest**, provide instructions in your Hermes Agent system prompt or persona guidelines:
+To coordinate **Jellyfin** and **MusicRequest** seamlessly:
 
 ```markdown
 ### Music Library & Acquisition Workflow
@@ -118,18 +93,4 @@ When the user asks to play, find, or download music:
 
 4. **Trigger Jellyfin Rescan**:
    - Once a download completes, call `jellyfin_trigger_scan()` so Jellyfin scans the music directory and makes the newly acquired songs available immediately.
-```
-
----
-
-## Testing & Manual Run
-
-To test the MCP server manually from terminal:
-```bash
-# Using uv:
-MUSICREQUEST_URL="http://localhost:8080" MUSICREQUEST_PASSCODE="1099" uv run mcp/musicrequest_mcp.py
-
-# Using python directly:
-pip install "mcp>=1.0.0" "httpx>=0.27.0"
-python mcp/musicrequest_mcp.py
 ```

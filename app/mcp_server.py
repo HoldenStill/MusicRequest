@@ -1,109 +1,31 @@
-# /// script
-# requires-python = ">=3.11"
-# dependencies = ["mcp>=1.0.0", "httpx>=0.27.0"]
-# ///
+"""Built-in Streamable HTTP MCP Server for MusicRequest.
 
-"""MusicRequest MCP Server for Hermes Agent.
-
-Provides structured tools to search Qobuz music, inspect album tracklists,
-enqueue album or track downloads, check queue status, and perform quick
-search-and-enqueue operations against a self-hosted MusicRequest instance.
+Exposes Qobuz search, album tracklist lookup, download queueing, queue status,
+and quick-download tools directly inside the MusicRequest FastAPI process.
 """
 
-import os
-from typing import Any
-import httpx
+from __future__ import annotations
 
-try:
-    from mcp.server.mcpserver import MCPServer
-    mcp = MCPServer("musicrequest-api")
-except ImportError:
-    from mcp.server.fastmcp import FastMCP
-    mcp = FastMCP("musicrequest-api")
+import hmac
+import json
+from typing import Any, Callable
 
-MUSICREQUEST_URL = os.environ.get("MUSICREQUEST_URL", "http://localhost:8080").rstrip("/")
-MUSICREQUEST_PASSCODE = os.environ.get("MUSICREQUEST_PASSCODE", "1099")
-_ENV_DEFAULT_QUALITY = os.environ.get("MUSICREQUEST_DEFAULT_QUALITY", "").strip()
-MUSICREQUEST_DEFAULT_QUALITY: int | None = (
-    int(_ENV_DEFAULT_QUALITY) if _ENV_DEFAULT_QUALITY.isdigit() else None
-)
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 
-_cached_session_cookie: str | None = None
+mcp_server = MCPServer("musicrequest-api")
 
 
-def _get_configured_quality(quality: int | None) -> int | None:
-    """Return explicit quality override or environment default quality."""
-    if quality is not None:
-        return quality
-    return MUSICREQUEST_DEFAULT_QUALITY
+def _get_handler() -> Any:
+    """Lazily retrieve the active StreamripHandler from app.main."""
+    from app import main as app_main
 
-
-async def _get_auth_cookie(client: httpx.AsyncClient, force_refresh: bool = False) -> str:
-    """Retrieve or renew session_token cookie via /api/auth."""
-    global _cached_session_cookie
-    if _cached_session_cookie and not force_refresh:
-        return _cached_session_cookie
-
-    auth_url = f"{MUSICREQUEST_URL}/api/auth"
-    resp = await client.post(auth_url, json={"passcode": MUSICREQUEST_PASSCODE})
-    if resp.status_code != 200:
-        raise RuntimeError(
-            f"Failed to authenticate with MusicRequest at {auth_url} (HTTP {resp.status_code}). "
-            "Please check MUSICREQUEST_URL and MUSICREQUEST_PASSCODE."
+    if app_main.handler is None:
+        raise ToolError(
+            "MusicRequest handler is not initialized yet. Please wait for server startup."
         )
-
-    # Extract session_token cookie
-    token = resp.cookies.get("session_token")
-    if not token:
-        set_cookie = resp.headers.get("set-cookie", "")
-        if "session_token=" in set_cookie:
-            token = set_cookie.split("session_token=")[1].split(";")[0].strip()
-
-    if not token:
-        raise RuntimeError(
-            "MusicRequest authentication succeeded but no session_token cookie was received."
-        )
-
-    _cached_session_cookie = token
-    return _cached_session_cookie
-
-
-async def _api_request(
-    method: str,
-    path: str,
-    params: dict[str, Any] | None = None,
-    json_data: dict[str, Any] | None = None,
-) -> Any:
-    """Execute authenticated API request to MusicRequest with automatic 401 token refresh."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        cookie = await _get_auth_cookie(client)
-        headers = {
-            "Cookie": f"session_token={cookie}",
-            "Accept": "application/json",
-        }
-
-        resp = await client.request(
-            method=method,
-            url=f"{MUSICREQUEST_URL}{path}",
-            params=params,
-            json=json_data,
-            headers=headers,
-        )
-
-        # Retry once on 401 Unauthorized in case session expired
-        if resp.status_code == 401:
-            cookie = await _get_auth_cookie(client, force_refresh=True)
-            headers["Cookie"] = f"session_token={cookie}"
-            resp = await client.request(
-                method=method,
-                url=f"{MUSICREQUEST_URL}{path}",
-                params=params,
-                json=json_data,
-                headers=headers,
-            )
-
-        resp.raise_for_status()
-        return resp.json()
+    return app_main.handler
 
 
 def _compact_search_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -170,7 +92,7 @@ def _compact_job(job: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def musicrequest_search(
     query: str,
     type: str = "album",
@@ -181,43 +103,39 @@ async def musicrequest_search(
     type: Search target type — 'album' (default), 'track', or 'artist'.
     limit: Maximum results to return (1-20, default 10).
     """
+    handler = _get_handler()
     safe_type = type.lower().strip()
     if safe_type not in ("album", "track", "artist"):
         safe_type = "album"
 
     safe_limit = min(max(int(limit), 1), 20)
-    data = await _api_request(
-        method="GET",
-        path="/api/search",
-        params={"q": query, "type": safe_type, "limit": safe_limit},
-    )
-
+    data = await handler.search(query, safe_limit, media_type=safe_type)
     if not isinstance(data, list):
         return []
-
     return [_compact_search_item(i) for i in data]
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def musicrequest_get_album_tracks(album_id: str) -> dict[str, Any]:
     """Get album tracklist and metadata from MusicRequest for a specific Qobuz album ID.
     album_id: Qobuz album identifier (e.g. '0060253738012' or 'yauvpj1r6g2ha').
     """
+    handler = _get_handler()
     clean_id = album_id.strip()
-    data = await _api_request(
-        method="GET",
-        path=f"/api/album/{clean_id}/tracks",
-    )
+    data = await handler.get_album_tracks(clean_id)
+    if not data:
+        raise ToolError(f"Album '{clean_id}' not found.")
 
-    tracks = []
-    for t in data.get("tracks", []):
-        tracks.append({
+    tracks = [
+        {
             "track_id": t.get("track_id"),
             "track_no": t.get("track_number"),
             "title": t.get("title"),
             "duration_sec": t.get("duration_seconds"),
             "hires": t.get("hires", False),
-        })
+        }
+        for t in data.get("tracks", [])
+    ]
 
     return {
         "album_id": data.get("album_id", clean_id),
@@ -229,7 +147,7 @@ async def musicrequest_get_album_tracks(album_id: str) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def musicrequest_download(
     album_id: str,
     title: str,
@@ -246,47 +164,40 @@ async def musicrequest_download(
     download_type: 'album' (default) or 'track'.
     track_id: Required if download_type is 'track'.
     quality: Audio quality override (1: 320k MP3, 2: 16/44.1 CD FLAC, 3: 24/<=96 Hi-Res, 4: 24/>=96 Hi-Res).
-             If omitted, uses the server or environment default.
+             If omitted, uses the server default.
     cover_art_url: Optional cover art URL for display in queue.
     """
+    handler = _get_handler()
     safe_type = download_type.lower().strip()
     if safe_type not in ("album", "track"):
         safe_type = "album"
 
-    payload: dict[str, Any] = {
-        "album_id": album_id.strip(),
-        "title": title.strip(),
-        "artist": artist.strip(),
-        "download_type": safe_type,
-        "track_id": track_id.strip() if track_id else None,
-        "quality": _get_configured_quality(quality),
-        "cover_art_url": cover_art_url.strip(),
-    }
-
-    result = await _api_request(
-        method="POST",
-        path="/api/download",
-        json_data=payload,
+    job = await handler.enqueue_download(
+        album_id=album_id.strip(),
+        title=title.strip(),
+        artist=artist.strip(),
+        download_type=safe_type,
+        track_id=track_id.strip() if track_id else None,
+        quality=quality,
+        cover_art_url=cover_art_url.strip(),
     )
 
     return {
         "status": "queued",
-        "job_id": result.get("job_id"),
-        "title": title,
-        "artist": artist,
+        "job_id": job.job_id,
+        "title": title.strip(),
+        "artist": artist.strip(),
         "download_type": safe_type,
     }
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def musicrequest_queue_status(active_only: bool = False) -> dict[str, Any]:
     """Check current download queue status on MusicRequest.
     active_only: When True, returns active download and queue count without completed list.
     """
-    data = await _api_request(
-        method="GET",
-        path="/api/queue/status",
-    )
+    handler = _get_handler()
+    data = handler.get_queue_status()
 
     active = _compact_job(data["active_job"]) if data.get("active_job") else None
     queued = [_compact_job(j) for j in data.get("queued_jobs", [])]
@@ -306,7 +217,7 @@ async def musicrequest_queue_status(active_only: bool = False) -> dict[str, Any]
     }
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def musicrequest_quick_download(
     query: str,
     artist: str = "",
@@ -319,17 +230,12 @@ async def musicrequest_quick_download(
     download_type: 'album' (default, downloads full album) or 'track' (downloads single song).
     quality: Quality override (1: 320k MP3, 2: 16/44.1 CD, 3: 24/<=96 Hi-Res, 4: 24/>=96 Hi-Res).
     """
+    handler = _get_handler()
     safe_type = download_type.lower().strip()
     if safe_type not in ("album", "track"):
         safe_type = "album"
 
-    # Search for top candidates
-    search_results = await _api_request(
-        method="GET",
-        path="/api/search",
-        params={"q": query, "type": safe_type, "limit": 10},
-    )
-
+    search_results = await handler.search(query, 10, media_type=safe_type)
     if not search_results or not isinstance(search_results, list):
         return {
             "status": "error",
@@ -337,8 +243,6 @@ async def musicrequest_quick_download(
         }
 
     best_match: dict[str, Any] | None = None
-
-    # If artist hint provided, look for artist match
     if artist.strip():
         target_artist = artist.strip().lower()
         for item in search_results:
@@ -347,7 +251,6 @@ async def musicrequest_quick_download(
                 best_match = item
                 break
 
-    # If no artist match found or no artist specified, choose top search result
     if not best_match:
         best_match = search_results[0]
 
@@ -364,29 +267,21 @@ async def musicrequest_quick_download(
             "candidate": best_match,
         }
 
-    # Enqueue download
-    chosen_quality = _get_configured_quality(quality)
-    payload: dict[str, Any] = {
-        "album_id": album_id,
-        "title": title,
-        "artist": matched_artist,
-        "download_type": safe_type,
-        "track_id": track_id,
-        "quality": chosen_quality,
-        "cover_art_url": cover_art_url,
-    }
-
-    dl_resp = await _api_request(
-        method="POST",
-        path="/api/download",
-        json_data=payload,
+    job = await handler.enqueue_download(
+        album_id=album_id,
+        title=title,
+        artist=matched_artist,
+        download_type=safe_type,
+        track_id=track_id,
+        quality=quality,
+        cover_art_url=cover_art_url,
     )
 
     return {
         "status": "queued",
-        "job_id": dl_resp.get("job_id"),
+        "job_id": job.job_id,
         "download_type": safe_type,
-        "quality": chosen_quality,
+        "quality": quality,
         "matched_item": {
             "title": title,
             "artist": matched_artist,
@@ -398,5 +293,68 @@ async def musicrequest_quick_download(
     }
 
 
-if __name__ == "__main__":
-    mcp.run()
+class BearerAuthASGIApp:
+    """ASGI wrapper enforcing Authorization: Bearer <token> using constant-time comparison."""
+
+    def __init__(self, app: Any, token_getter: Callable[[], str]) -> None:
+        self.app = app
+        self.token_getter = token_getter
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        expected = self.token_getter()
+        if not expected:
+            await self._send_unauthorized(send)
+            return
+
+        auth_header = ""
+        for name, value in scope.get("headers", []):
+            if name.lower() == b"authorization":
+                auth_header = value.decode("latin-1")
+                break
+
+        scheme, _, token = auth_header.partition(" ")
+        if scheme.lower() != "bearer" or not token.strip():
+            await self._send_unauthorized(send)
+            return
+
+        if not hmac.compare_digest(token.strip().encode("utf-8"), expected.encode("utf-8")):
+            await self._send_unauthorized(send)
+            return
+
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _send_unauthorized(send: Any) -> None:
+        body = json.dumps({"detail": "Unauthorized"}).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+                (b"www-authenticate", b"Bearer"),
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": body,
+        })
+
+
+def create_mcp_sub_app() -> Any:
+    """Build a fresh Streamable HTTP Starlette sub-application (and session manager)."""
+    # Disable localhost-only DNS rebinding protection so reverse proxies (Nginx Proxy Manager)
+    # and LAN/Docker hostnames work seamlessly; /mcp is protected by Bearer token auth.
+    return mcp_server.streamable_http_app(
+        streamable_http_path="/mcp",
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )
+
+
+def create_mcp_asgi_app(token_getter: Callable[[], str]) -> BearerAuthASGIApp:
+    """Build the Streamable HTTP MCP sub-application wrapped with Bearer auth."""
+    return BearerAuthASGIApp(create_mcp_sub_app(), token_getter)

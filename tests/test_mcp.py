@@ -1,297 +1,265 @@
-"""Unit tests for MusicRequest MCP Server."""
+"""Integration and unit tests for the built-in MusicRequest /mcp endpoint."""
 
-import importlib.util
-from pathlib import Path
+import json
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
+from fastapi.testclient import TestClient
 
-# Load mcp/musicrequest_mcp.py dynamically to avoid namespace shadowing
-_MCP_PATH = Path(__file__).resolve().parent.parent / "mcp" / "musicrequest_mcp.py"
-_spec = importlib.util.spec_from_file_location("musicrequest_mcp", str(_MCP_PATH))
-mr_mcp = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(mr_mcp)
+from app import main as app_main
+from app import mcp_server
 
 
-@pytest.fixture(autouse=True)
-def reset_mcp_state():
-    """Reset cached session cookie between tests."""
-    mr_mcp._cached_session_cookie = None
-    mr_mcp.MUSICREQUEST_URL = "http://test-server:8080"
-    mr_mcp.MUSICREQUEST_PASSCODE = "test_passcode"
-    mr_mcp.MUSICREQUEST_DEFAULT_QUALITY = None
-    yield
-    mr_mcp._cached_session_cookie = None
+def _parse_mcp_response(resp: Any) -> dict[str, Any]:
+    """Parse JSON-RPC payload from either application/json or text/event-stream."""
+    content_type = resp.headers.get("content-type", "")
+    if "text/event-stream" in content_type:
+        for line in resp.text.splitlines():
+            if line.startswith("data: "):
+                payload = line[len("data: "):].strip()
+                if payload:
+                    return json.loads(payload)
+        raise AssertionError(f"No JSON-RPC data line found in SSE response: {resp.text!r}")
+    return resp.json()
 
 
-# ── Compacting Helpers Tests ─────────────────────────────────────────────────
+def _mcp_headers(token: str, session_id: str | None = None) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    if session_id:
+        headers["Mcp-Session-Id"] = session_id
+    return headers
 
-def test_compact_search_item_album():
-    raw_album = {
-        "type": "album",
-        "album_id": "alb-123",
+
+def _init_mcp_session(client: TestClient, token: str) -> str:
+    """Initialize an MCP Streamable HTTP session and return the session ID."""
+    resp = client.post(
+        "/mcp",
+        headers=_mcp_headers(token),
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest-client", "version": "1.0.0"},
+            },
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200, resp.text
+    session_id = resp.headers.get("mcp-session-id")
+    assert session_id, "Expected Mcp-Session-Id header on initialize response"
+
+    # Send initialized notification
+    notif = client.post(
+        "/mcp",
+        headers=_mcp_headers(token, session_id),
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+        follow_redirects=False,
+    )
+    assert notif.status_code in (200, 202, 204), notif.text
+    return session_id
+
+
+def _call_tool(
+    client: TestClient,
+    token: str,
+    session_id: str,
+    name: str,
+    arguments: dict[str, Any],
+    req_id: int = 2,
+) -> dict[str, Any]:
+    resp = client.post(
+        "/mcp",
+        headers=_mcp_headers(token, session_id),
+        json={
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200, resp.text
+    return _parse_mcp_response(resp)
+
+
+@pytest.fixture
+def mock_handler(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Provide a mocked StreamripHandler and wire it into app.main during TestClient lifespan."""
+    handler = MagicMock()
+    handler.start_worker = AsyncMock()
+    handler.stop_worker = AsyncMock()
+    handler.search = AsyncMock(return_value=[])
+    handler.get_album_tracks = AsyncMock(return_value=None)
+    handler.enqueue_download = AsyncMock(
+        return_value=SimpleNamespace(job_id="job-123")
+    )
+    handler.get_queue_status = MagicMock(
+        return_value={"active_job": None, "queued_jobs": [], "completed_jobs": []}
+    )
+    # Prevent lifespan from spawning a real Qobuz/Streamrip client or touching disk
+    monkeypatch.setattr(app_main, "StreamripHandler", lambda **kwargs: handler)
+    return handler
+
+
+# ── Bearer Auth Tests ────────────────────────────────────────────────────────
+
+def test_mcp_auth_missing_and_invalid_tokens(
+    mock_handler: MagicMock, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MCP_API_TOKEN", "super-secret-mcp-token")
+    init_body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1.0"},
+        },
+    }
+
+    with TestClient(app_main.app) as client:
+        # Missing Authorization header
+        r1 = client.post("/mcp", json=init_body, follow_redirects=False)
+        assert r1.status_code == 401
+        assert r1.headers.get("www-authenticate") == "Bearer"
+
+        # Wrong scheme
+        r2 = client.post(
+            "/mcp",
+            json=init_body,
+            headers={"Authorization": "Basic dXNlcjpwYXNz"},
+            follow_redirects=False,
+        )
+        assert r2.status_code == 401
+
+        # Wrong token
+        r3 = client.post(
+            "/mcp",
+            json=init_body,
+            headers={"Authorization": "Bearer wrong-token"},
+            follow_redirects=False,
+        )
+        assert r3.status_code == 401
+
+
+def test_mcp_auth_fail_closed_when_unconfigured(
+    mock_handler: MagicMock, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MCP_API_TOKEN", "")
+    monkeypatch.setenv("APP_PASSCODE", "")
+
+    with TestClient(app_main.app) as client:
+        resp = client.post(
+            "/mcp",
+            headers=_mcp_headers("1099"),
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 401
+
+
+def test_mcp_auth_fallback_to_app_passcode(
+    mock_handler: MagicMock, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MCP_API_TOKEN", raising=False)
+    monkeypatch.setenv("APP_PASSCODE", "fallback-passcode-99")
+
+    with TestClient(app_main.app) as client:
+        session_id = _init_mcp_session(client, "fallback-passcode-99")
+        assert session_id
+
+
+def test_mcp_auth_prefers_mcp_api_token_over_passcode(
+    mock_handler: MagicMock, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MCP_API_TOKEN", "dedicated-mcp-token")
+    monkeypatch.setenv("APP_PASSCODE", "1099")
+
+    with TestClient(app_main.app) as client:
+        # Fallback passcode should be rejected when MCP_API_TOKEN is set
+        r_bad = client.post(
+            "/mcp",
+            headers=_mcp_headers("1099"),
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            follow_redirects=False,
+        )
+        assert r_bad.status_code == 401
+
+        # Dedicated token succeeds
+        session_id = _init_mcp_session(client, "dedicated-mcp-token")
+        assert session_id
+
+
+# ── MCP Tools End-to-End Tests ───────────────────────────────────────────────
+
+def test_mcp_list_and_call_all_tools(
+    mock_handler: MagicMock, monkeypatch: pytest.MonkeyPatch
+):
+    token = "test-mcp-token"
+    monkeypatch.setenv("MCP_API_TOKEN", token)
+
+    mock_handler.search.side_effect = [
+        # Call 1: musicrequest_search
+        [
+            {
+                "type": "album",
+                "album_id": "0060253738012",
+                "title": "Random Access Memories",
+                "artist": "Daft Punk",
+                "release_year": 2013,
+                "tracks_count": 13,
+                "hires": True,
+                "maximum_bit_depth": 24,
+                "maximum_sampling_rate": 88.2,
+                "cover_art_url": "https://img.qobuz.com/ram.jpg",
+            }
+        ],
+        # Call 2: musicrequest_quick_download (match)
+        [
+            {
+                "album_id": "wrong-alb",
+                "title": "Random Access",
+                "artist": "Other Artist",
+                "hires": False,
+            },
+            {
+                "album_id": "0060253738012",
+                "title": "Random Access Memories",
+                "artist": "Daft Punk",
+                "release_year": 2013,
+                "hires": True,
+                "cover_art_url": "https://img.qobuz.com/ram.jpg",
+            },
+        ],
+        # Call 3: musicrequest_quick_download (not found)
+        [],
+    ]
+    mock_handler.get_album_tracks.return_value = {
+        "album_id": "0060253738012",
         "title": "Random Access Memories",
         "artist": "Daft Punk",
         "release_year": 2013,
-        "tracks_count": 13,
-        "duration_seconds": 4464,
-        "maximum_bit_depth": 24,
-        "maximum_sampling_rate": 88.2,
-        "hires": True,
-        "cover_art_url": "https://img.qobuz.com/alb123.jpg",
-        "extra_verbose_field": "ignore_me",
-    }
-    compact = mr_mcp._compact_search_item(raw_album)
-    assert compact["album_id"] == "alb-123"
-    assert compact["title"] == "Random Access Memories"
-    assert compact["artist"] == "Daft Punk"
-    assert compact["year"] == 2013
-    assert compact["tracks"] == 13
-    assert compact["hires"] is True
-    assert compact["quality_spec"] == "24-bit/88.2kHz"
-    assert "extra_verbose_field" not in compact
-
-
-def test_compact_search_item_track():
-    raw_track = {
-        "type": "track",
-        "track_id": "trk-456",
-        "title": "Get Lucky",
-        "artist": "Daft Punk",
-        "album": "Random Access Memories",
-        "album_id": "alb-123",
-        "duration_seconds": 369,
-        "track_number": 8,
-        "hires": True,
-    }
-    compact = mr_mcp._compact_search_item(raw_track)
-    assert compact["track_id"] == "trk-456"
-    assert compact["title"] == "Get Lucky"
-    assert compact["artist"] == "Daft Punk"
-    assert compact["track_no"] == 8
-    assert compact["duration_sec"] == 369
-    assert compact["hires"] is True
-
-
-def test_compact_search_item_artist():
-    raw_artist = {
-        "type": "artist",
-        "artist_id": "art-789",
-        "name": "Daft Punk",
-        "albums_count": 12,
-        "picture_url": "https://img.qobuz.com/art789.jpg",
-    }
-    compact = mr_mcp._compact_search_item(raw_artist)
-    assert compact["artist_id"] == "art-789"
-    assert compact["name"] == "Daft Punk"
-    assert compact["albums_count"] == 12
-
-
-def test_compact_job():
-    raw_job = {
-        "job_id": "job-abc",
-        "album_id": "alb-123",
-        "title": "Discovery",
-        "artist": "Daft Punk",
-        "status": "downloading",
-        "download_type": "album",
-        "quality": 3,
-        "error": None,
-        "queued_at": "2026-11-23T12:00:00",
-        "internal_worker_ref": "<Worker>",
-    }
-    compact = mr_mcp._compact_job(raw_job)
-    assert compact["job_id"] == "job-abc"
-    assert compact["status"] == "downloading"
-    assert compact["quality"] == 3
-    assert "internal_worker_ref" not in compact
-
-
-def test_get_configured_quality():
-    mr_mcp.MUSICREQUEST_DEFAULT_QUALITY = 2
-    # Explicit quality takes precedence
-    assert mr_mcp._get_configured_quality(4) == 4
-    # None falls back to default
-    assert mr_mcp._get_configured_quality(None) == 2
-
-    mr_mcp.MUSICREQUEST_DEFAULT_QUALITY = None
-    assert mr_mcp._get_configured_quality(None) is None
-
-
-# ── Auth & Request Tests ─────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_get_auth_cookie_success():
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-    mock_response = MagicMock(spec=httpx.Response)
-    mock_response.status_code = 200
-    mock_response.cookies = {"session_token": "valid_token_xyz"}
-    mock_client.post.return_value = mock_response
-
-    cookie = await mr_mcp._get_auth_cookie(mock_client)
-    assert cookie == "valid_token_xyz"
-    assert mr_mcp._cached_session_cookie == "valid_token_xyz"
-    mock_client.post.assert_called_once_with(
-        "http://test-server:8080/api/auth",
-        json={"passcode": "test_passcode"},
-    )
-
-
-@pytest.mark.asyncio
-async def test_get_auth_cookie_invalid_passcode():
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-    mock_response = MagicMock(spec=httpx.Response)
-    mock_response.status_code = 401
-    mock_client.post.return_value = mock_response
-
-    with pytest.raises(RuntimeError, match="Failed to authenticate with MusicRequest"):
-        await mr_mcp._get_auth_cookie(mock_client)
-
-
-@pytest.mark.asyncio
-async def test_get_auth_cookie_missing_cookie():
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-    mock_response = MagicMock(spec=httpx.Response)
-    mock_response.status_code = 200
-    mock_response.cookies = {}
-    mock_response.headers = {}
-    mock_client.post.return_value = mock_response
-
-    with pytest.raises(RuntimeError, match="no session_token cookie was received"):
-        await mr_mcp._get_auth_cookie(mock_client)
-
-
-@pytest.mark.asyncio
-async def test_api_request_auto_retry_on_401():
-    """Verify that a 401 response forces a token refresh and retries once."""
-    mr_mcp._cached_session_cookie = "expired_token"
-
-    mock_resp_401 = MagicMock(spec=httpx.Response)
-    mock_resp_401.status_code = 401
-
-    mock_resp_200 = MagicMock(spec=httpx.Response)
-    mock_resp_200.status_code = 200
-    mock_resp_200.json.return_value = {"result": "success"}
-
-    mock_auth_resp = MagicMock(spec=httpx.Response)
-    mock_auth_resp.status_code = 200
-    mock_auth_resp.cookies = {"session_token": "new_fresh_token"}
-
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-    mock_client.request.side_effect = [mock_resp_401, mock_resp_200]
-    mock_client.post.return_value = mock_auth_resp
-
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client_cls.return_value.__aenter__.return_value = mock_client
-        data = await mr_mcp._api_request("GET", "/api/queue/status")
-
-    assert data == {"result": "success"}
-    assert mr_mcp._cached_session_cookie == "new_fresh_token"
-    assert mock_client.request.call_count == 2
-
-
-# ── MCP Tool Execution Tests ────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_musicrequest_search():
-    sample_albums = [
-        {
-            "type": "album",
-            "album_id": "0060253738012",
-            "title": "Random Access Memories",
-            "artist": "Daft Punk",
-            "release_year": 2013,
-            "tracks_count": 13,
-            "hires": True,
-            "maximum_bit_depth": 24,
-            "maximum_sampling_rate": 88.2,
-        }
-    ]
-
-    with patch.object(mr_mcp, "_api_request", new_callable=AsyncMock) as mock_req:
-        mock_req.return_value = sample_albums
-        results = await mr_mcp.musicrequest_search(query="Daft Punk", type="album", limit=5)
-
-    assert len(results) == 1
-    assert results[0]["title"] == "Random Access Memories"
-    assert results[0]["quality_spec"] == "24-bit/88.2kHz"
-    mock_req.assert_called_once_with(
-        method="GET",
-        path="/api/search",
-        params={"q": "Daft Punk", "type": "album", "limit": 5},
-    )
-
-
-@pytest.mark.asyncio
-async def test_musicrequest_get_album_tracks():
-    sample_album_info = {
-        "album_id": "alb-123",
-        "title": "Discovery",
-        "artist": "Daft Punk",
-        "release_year": 2001,
         "tracks": [
             {
                 "track_id": "trk-1",
                 "track_number": 1,
-                "title": "One More Time",
-                "duration_seconds": 320,
-                "hires": False,
-            },
-            {
-                "track_id": "trk-2",
-                "track_number": 2,
-                "title": "Aerodynamic",
-                "duration_seconds": 212,
-                "hires": False,
-            },
+                "title": "Give Life Back to Music",
+                "duration_seconds": 274,
+                "hires": True,
+            }
         ],
     }
-
-    with patch.object(mr_mcp, "_api_request", new_callable=AsyncMock) as mock_req:
-        mock_req.return_value = sample_album_info
-        details = await mr_mcp.musicrequest_get_album_tracks("alb-123")
-
-    assert details["album_id"] == "alb-123"
-    assert details["title"] == "Discovery"
-    assert details["total_tracks"] == 2
-    assert len(details["tracks"]) == 2
-    assert details["tracks"][0]["title"] == "One More Time"
-
-
-@pytest.mark.asyncio
-async def test_musicrequest_download():
-    with patch.object(mr_mcp, "_api_request", new_callable=AsyncMock) as mock_req:
-        mock_req.return_value = {"job_id": "job-999", "status": "queued"}
-        res = await mr_mcp.musicrequest_download(
-            album_id="alb-123",
-            title="Discovery",
-            artist="Daft Punk",
-            download_type="album",
-            quality=3,
-        )
-
-    assert res["status"] == "queued"
-    assert res["job_id"] == "job-999"
-    mock_req.assert_called_once_with(
-        method="POST",
-        path="/api/download",
-        json_data={
-            "album_id": "alb-123",
-            "title": "Discovery",
-            "artist": "Daft Punk",
-            "download_type": "album",
-            "track_id": None,
-            "quality": 3,
-            "cover_art_url": "",
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_musicrequest_queue_status():
-    queue_data = {
+    mock_handler.get_queue_status.return_value = {
         "active_job": {
             "job_id": "job-1",
             "title": "Discovery",
@@ -308,84 +276,146 @@ async def test_musicrequest_queue_status():
                 "download_type": "album",
             }
         ],
-        "completed_jobs": [
-            {
-                "job_id": "job-0",
-                "title": "Alive 2007",
-                "artist": "Daft Punk",
-                "status": "completed",
-                "download_type": "album",
-            }
-        ],
+        "completed_jobs": [],
     }
 
-    with patch.object(mr_mcp, "_api_request", new_callable=AsyncMock) as mock_req:
-        mock_req.return_value = queue_data
-        full_status = await mr_mcp.musicrequest_queue_status(active_only=False)
+    with TestClient(app_main.app) as client:
+        session_id = _init_mcp_session(client, token)
 
-    assert full_status["active_job"]["title"] == "Discovery"
-    assert len(full_status["queued_jobs"]) == 1
-    assert len(full_status["completed_jobs"]) == 1
-
-    with patch.object(mr_mcp, "_api_request", new_callable=AsyncMock) as mock_req:
-        mock_req.return_value = queue_data
-        active_status = await mr_mcp.musicrequest_queue_status(active_only=True)
-
-    assert active_status["active_job"]["title"] == "Discovery"
-    assert active_status["queued_count"] == 1
-    assert active_status["completed_count"] == 1
-    assert "queued_jobs" not in active_status
-
-
-@pytest.mark.asyncio
-async def test_musicrequest_quick_download_with_artist_match():
-    search_results = [
-        {
-            "album_id": "wrong-artist",
-            "title": "Random Access",
-            "artist": "Some Other Artist",
-            "hires": False,
-        },
-        {
-            "album_id": "correct-alb",
-            "title": "Random Access Memories",
-            "artist": "Daft Punk",
-            "hires": True,
-            "release_year": 2013,
-            "cover_art_url": "https://img.qobuz.com/cov.jpg",
-        },
-    ]
-
-    async def mock_api(method: str, path: str, **kwargs):
-        if path == "/api/search":
-            return search_results
-        if path == "/api/download":
-            return {"job_id": "job-auto-1", "status": "queued"}
-        return {}
-
-    with patch.object(mr_mcp, "_api_request", side_effect=mock_api):
-        result = await mr_mcp.musicrequest_quick_download(
-            query="Random Access Memories",
-            artist="Daft Punk",
-            download_type="album",
-            quality=3,
+        # 1. tools/list
+        list_resp = client.post(
+            "/mcp",
+            headers=_mcp_headers(token, session_id),
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         )
+        assert list_resp.status_code == 200
+        tools = _parse_mcp_response(list_resp)["result"]["tools"]
+        tool_names = {t["name"] for t in tools}
+        assert tool_names == {
+            "musicrequest_search",
+            "musicrequest_get_album_tracks",
+            "musicrequest_download",
+            "musicrequest_queue_status",
+            "musicrequest_quick_download",
+        }
 
-    assert result["status"] == "queued"
-    assert result["job_id"] == "job-auto-1"
-    assert result["matched_item"]["album_id"] == "correct-alb"
-    assert result["matched_item"]["artist"] == "Daft Punk"
-    assert result["matched_item"]["hires"] is True
-
-
-@pytest.mark.asyncio
-async def test_musicrequest_quick_download_not_found():
-    with patch.object(mr_mcp, "_api_request", new_callable=AsyncMock) as mock_req:
-        mock_req.return_value = []
-        result = await mr_mcp.musicrequest_quick_download(
-            query="NonExistentAlbumXYZ123",
-            download_type="album",
+        # 2. musicrequest_search
+        search_rpc = _call_tool(
+            client,
+            token,
+            session_id,
+            "musicrequest_search",
+            {"query": "Daft Punk", "type": "album", "limit": 5},
+            req_id=3,
         )
+        search_data = json.loads(search_rpc["result"]["content"][0]["text"])
+        if isinstance(search_data, dict):
+            search_data = [search_data]
+        assert search_data[0]["album_id"] == "0060253738012"
+        assert search_data[0]["quality_spec"] == "24-bit/88.2kHz"
+        assert "cover_art_url" not in search_data[0]
 
-    assert result["status"] == "error"
-    assert "No album matches found" in result["message"]
+        # 3. musicrequest_get_album_tracks
+        tracks_rpc = _call_tool(
+            client,
+            token,
+            session_id,
+            "musicrequest_get_album_tracks",
+            {"album_id": "0060253738012"},
+            req_id=4,
+        )
+        tracks_data = json.loads(tracks_rpc["result"]["content"][0]["text"])
+        assert tracks_data["total_tracks"] == 1
+        assert tracks_data["tracks"][0]["title"] == "Give Life Back to Music"
+
+        # 4. musicrequest_download
+        dl_rpc = _call_tool(
+            client,
+            token,
+            session_id,
+            "musicrequest_download",
+            {
+                "album_id": "0060253738012",
+                "title": "Random Access Memories",
+                "artist": "Daft Punk",
+                "quality": 3,
+            },
+            req_id=5,
+        )
+        dl_data = json.loads(dl_rpc["result"]["content"][0]["text"])
+        assert dl_data["status"] == "queued"
+        assert dl_data["job_id"] == "job-123"
+
+        # 5. musicrequest_queue_status (full and active_only)
+        q_rpc = _call_tool(
+            client,
+            token,
+            session_id,
+            "musicrequest_queue_status",
+            {"active_only": False},
+            req_id=6,
+        )
+        q_data = json.loads(q_rpc["result"]["content"][0]["text"])
+        assert q_data["active_job"]["title"] == "Discovery"
+        assert len(q_data["queued_jobs"]) == 1
+
+        q_active_rpc = _call_tool(
+            client,
+            token,
+            session_id,
+            "musicrequest_queue_status",
+            {"active_only": True},
+            req_id=7,
+        )
+        q_active = json.loads(q_active_rpc["result"]["content"][0]["text"])
+        assert q_active["queued_count"] == 1
+        assert "queued_jobs" not in q_active
+
+        # 6. musicrequest_quick_download (artist match)
+        qd_rpc = _call_tool(
+            client,
+            token,
+            session_id,
+            "musicrequest_quick_download",
+            {"query": "Random Access Memories", "artist": "Daft Punk", "quality": 3},
+            req_id=8,
+        )
+        qd_data = json.loads(qd_rpc["result"]["content"][0]["text"])
+        assert qd_data["status"] == "queued"
+        assert qd_data["matched_item"]["album_id"] == "0060253738012"
+        assert qd_data["matched_item"]["artist"] == "Daft Punk"
+
+        # 7. musicrequest_quick_download (not found)
+        qd_miss_rpc = _call_tool(
+            client,
+            token,
+            session_id,
+            "musicrequest_quick_download",
+            {"query": "NonExistentAlbumXYZ"},
+            req_id=9,
+        )
+        qd_miss = json.loads(qd_miss_rpc["result"]["content"][0]["text"])
+        assert qd_miss["status"] == "error"
+
+
+def test_mcp_null_handler_guard(
+    mock_handler: MagicMock, monkeypatch: pytest.MonkeyPatch
+):
+    token = "test-mcp-token"
+    monkeypatch.setenv("MCP_API_TOKEN", token)
+
+    with TestClient(app_main.app) as client:
+        session_id = _init_mcp_session(client, token)
+        # Simulate uninitialized handler
+        monkeypatch.setattr(app_main, "handler", None)
+
+        rpc = _call_tool(
+            client,
+            token,
+            session_id,
+            "musicrequest_search",
+            {"query": "Daft Punk"},
+            req_id=10,
+        )
+        assert rpc["result"]["isError"] is True
+        assert "not initialized" in rpc["result"]["content"][0]["text"]
