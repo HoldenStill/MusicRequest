@@ -159,12 +159,35 @@ class StreamripHandler:
 
     @staticmethod
     def _extract_year(item: dict) -> str:
-        """Extract release year from a Qobuz item."""
+        """Extract 4-digit release year from a Qobuz item.
+
+        Prefers ISO date strings (release_date_original, release_date, etc.)
+        and falls back to converting Unix timestamps (released_at) in UTC.
+        """
         if not isinstance(item, dict):
             return ""
-        release_date = item.get("released_at") or item.get("release_date_original") or ""
-        release_date = str(release_date)
-        return release_date[:4] if len(release_date) >= 4 else ""
+        for key in ("release_date_original", "release_date", "release_date_stream", "release_date_download"):
+            val = item.get(key)
+            if isinstance(val, str) and len(val) >= 4 and val[:4].isdigit():
+                year_num = int(val[:4])
+                if 1900 <= year_num <= 2100:
+                    return val[:4]
+
+        released_at = item.get("released_at")
+        if released_at is not None and released_at != "":
+            if isinstance(released_at, str) and (len(released_at) == 4 or not released_at.isdigit()):
+                if len(released_at) >= 4 and released_at[:4].isdigit():
+                    year_num = int(released_at[:4])
+                    if 1900 <= year_num <= 2100:
+                        return released_at[:4]
+            try:
+                ts = float(released_at)
+                dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+                if 1900 <= dt.year <= 2100:
+                    return str(dt.year)
+            except (ValueError, TypeError, OverflowError, OSError):
+                pass
+        return ""
 
     @staticmethod
     def _estimate_album_size(tracks: list[dict], quality: int = 3) -> int:

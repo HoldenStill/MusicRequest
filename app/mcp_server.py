@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 from typing import Any, Callable
 
 from mcp.server.mcpserver import MCPServer
@@ -92,6 +93,56 @@ def _compact_job(job: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]+")
+
+
+def _norm_text(text: str) -> str:
+    """Normalize text for relevance scoring (lowercase, alphanumeric + collapsed spaces)."""
+    return " ".join(_NON_ALNUM_RE.sub(" ", (text or "").lower()).split())
+
+
+def _rank_and_filter_search_results(
+    items: list[dict[str, Any]], query: str
+) -> list[dict[str, Any]]:
+    """Rank exact/strong title+artist matches first and trim obvious low-relevance noise."""
+    norm_q = _norm_text(query)
+    if not norm_q or not items:
+        return items
+    q_tokens = set(norm_q.split())
+
+    scored: list[tuple[float, int, dict[str, Any]]] = []
+    for idx, item in enumerate(items):
+        norm_title = _norm_text(item.get("title") or item.get("name") or "")
+        norm_artist = _norm_text(item.get("artist") or "")
+        combined_tokens = set(f"{norm_title} {norm_artist}".split())
+
+        score = 0.0
+        if norm_title == norm_q or norm_artist == norm_q:
+            score += 100.0
+        elif norm_q in norm_title or norm_q in norm_artist:
+            score += 50.0
+        elif q_tokens and q_tokens.issubset(combined_tokens):
+            score += 25.0
+
+        if q_tokens:
+            overlap = len(q_tokens & combined_tokens) / len(q_tokens)
+            score += 10.0 * overlap
+
+        scored.append((score, -idx, item))
+
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+
+    # If we have at least one strong match (exact, substring, or all tokens matched),
+    # trim obvious noise where fewer than half the query tokens appear.
+    has_strong_match = scored[0][0] >= 25.0
+    if has_strong_match:
+        filtered = [item for score, _, item in scored if score >= 5.0]
+        if filtered:
+            return filtered
+
+    return [item for _, _, item in scored]
+
+
 @mcp_server.tool()
 async def musicrequest_search(
     query: str,
@@ -112,7 +163,8 @@ async def musicrequest_search(
     data = await handler.search(query, safe_limit, media_type=safe_type)
     if not isinstance(data, list):
         return []
-    return [_compact_search_item(i) for i in data]
+    ranked = _rank_and_filter_search_results(data, query)
+    return [_compact_search_item(i) for i in ranked]
 
 
 @mcp_server.tool()
@@ -131,8 +183,8 @@ async def musicrequest_get_album_tracks(album_id: str) -> dict[str, Any]:
             "track_id": t.get("track_id"),
             "track_no": t.get("track_number"),
             "title": t.get("title"),
-            "duration_sec": t.get("duration_seconds"),
-            "hires": t.get("hires", False),
+            "duration_sec": t.get("duration") if t.get("duration") is not None else t.get("duration_seconds"),
+            "hires": bool(t.get("hires") or ((t.get("bit_depth") or 16) > 16)),
         }
         for t in data.get("tracks", [])
     ]
@@ -199,21 +251,26 @@ async def musicrequest_queue_status(active_only: bool = False) -> dict[str, Any]
     handler = _get_handler()
     data = handler.get_queue_status()
 
-    active = _compact_job(data["active_job"]) if data.get("active_job") else None
-    queued = [_compact_job(j) for j in data.get("queued_jobs", [])]
+    # StreamripHandler.get_queue_status() returns {"active": ..., "queued": ..., "completed": ...}
+    raw_active = data.get("active") if "active" in data else data.get("active_job")
+    raw_queued = data.get("queued") if "queued" in data else data.get("queued_jobs", [])
+    raw_completed = data.get("completed") if "completed" in data else data.get("completed_jobs", [])
+
+    active = _compact_job(raw_active) if raw_active else None
+    queued = [_compact_job(j) for j in (raw_queued or [])]
+    completed = [_compact_job(j) for j in (raw_completed or [])]
 
     if active_only:
         return {
             "active_job": active,
             "queued_count": len(queued),
-            "completed_count": len(data.get("completed_jobs", [])),
+            "completed_count": len(completed),
         }
 
-    completed = [_compact_job(j) for j in data.get("completed_jobs", [])]
     return {
         "active_job": active,
         "queued_jobs": queued,
-        "completed_jobs": completed[:10],
+        "completed_jobs": list(reversed(completed))[:10],
     }
 
 
@@ -241,6 +298,7 @@ async def musicrequest_quick_download(
             "status": "error",
             "message": f"No {safe_type} matches found on Qobuz for query '{query}'.",
         }
+    search_results = _rank_and_filter_search_results(search_results, query)
 
     best_match: dict[str, Any] | None = None
     if artist.strip():

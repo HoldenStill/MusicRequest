@@ -260,14 +260,14 @@ def test_mcp_list_and_call_all_tools(
         ],
     }
     mock_handler.get_queue_status.return_value = {
-        "active_job": {
+        "active": {
             "job_id": "job-1",
             "title": "Discovery",
             "artist": "Daft Punk",
             "status": "downloading",
             "download_type": "album",
         },
-        "queued_jobs": [
+        "queued": [
             {
                 "job_id": "job-2",
                 "title": "Homework",
@@ -276,7 +276,15 @@ def test_mcp_list_and_call_all_tools(
                 "download_type": "album",
             }
         ],
-        "completed_jobs": [],
+        "completed": [
+            {
+                "job_id": "job-0",
+                "title": "Alive 2007",
+                "artist": "Daft Punk",
+                "status": "completed",
+                "download_type": "album",
+            }
+        ],
     }
 
     with TestClient(app_main.app) as client:
@@ -427,3 +435,47 @@ def test_root_renders_template_with_starlette_1x(mock_handler: MagicMock):
         resp = client.get("/")
         assert resp.status_code == 200
         assert "text/html" in resp.headers.get("content-type", "")
+
+
+def test_extract_year_handles_iso_and_unix_timestamps():
+    """Verify Qobuz ISO dates and Unix timestamps (e.g. Rainier Fog) extract 4-digit years."""
+    from app.streamrip_handler import StreamripHandler
+
+    # Unix timestamp + ISO date
+    assert StreamripHandler._extract_year({"released_at": 1535068800, "release_date_original": "2018-08-24"}) == "2018"
+    # Unix timestamp only (no ISO string)
+    assert StreamripHandler._extract_year({"released_at": 1535068800}) == "2018"
+    assert StreamripHandler._extract_year({"released_at": 717705600}) == "1992"
+    assert StreamripHandler._extract_year({"released_at": 649468800}) == "1990"
+    assert StreamripHandler._extract_year({"released_at": 759456000}) == "1994"
+    assert StreamripHandler._extract_year({"released_at": "2020-01-01"}) == "2020"
+    assert StreamripHandler._extract_year({}) == ""
+
+
+def test_mcp_search_ranking_and_noise_trimming(
+    mock_handler: MagicMock, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify exact matches rank first and unrelated noise results are trimmed."""
+    token = "test-mcp-token"
+    monkeypatch.setenv("MCP_API_TOKEN", token)
+
+    mock_handler.search.return_value = [
+        {"type": "album", "album_id": "noise-1", "title": "FOGON", "artist": "Random Artist"},
+        {"type": "album", "album_id": "noise-2", "title": "Somos Incontenibles", "artist": "Other"},
+        {"type": "album", "album_id": "sub-1", "title": "Rainier Fog (Deluxe)", "artist": "Alice In Chains"},
+        {"type": "album", "album_id": "exact-1", "title": "Rainier Fog", "artist": "Alice In Chains"},
+    ]
+
+    with TestClient(app_main.app) as client:
+        session_id = _init_mcp_session(client, token)
+        rpc = _call_tool(
+            client,
+            token,
+            session_id,
+            "musicrequest_search",
+            {"query": "Rainier Fog", "type": "album", "limit": 10},
+            req_id=20,
+        )
+        items = [json.loads(c["text"]) for c in rpc["result"]["content"]]
+        ids = [item["album_id"] for item in items]
+        assert ids == ["exact-1", "sub-1"]
