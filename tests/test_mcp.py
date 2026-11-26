@@ -419,3 +419,11 @@ def test_mcp_null_handler_guard(
         )
         assert rpc["result"]["isError"] is True
         assert "not initialized" in rpc["result"]["content"][0]["text"]
+
+
+def test_root_renders_template_with_starlette_1x(mock_handler: MagicMock):
+    """Verify GET / renders login.html cleanly with Starlette 1.x TemplateResponse."""
+    with TestClient(app_main.app) as client:
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")

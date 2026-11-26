@@ -234,7 +234,7 @@ async def logout(response: Response) -> dict[str, Any]:
 async def root(request: Request) -> Response:
     """Serve the main app if authenticated, otherwise the lock screen."""
     template = "index.html" if _is_authenticated(request) else "login.html"
-    return templates.TemplateResponse(template, {"request": request})
+    return templates.TemplateResponse(request=request, name=template)
 
 
 @app.get("/favicon.ico", include_in_schema=False)
